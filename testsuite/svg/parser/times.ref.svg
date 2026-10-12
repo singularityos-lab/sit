@@ -1,0 +1,54 @@
+<svg
+        xmlns='http://www.w3.org/2000/svg'
+        xmlns:svg='http://www.w3.org/2000/svg'
+        width='16'
+        height='16'>
+  <path
+          id='path0'
+          d='M 0 0 L 100 100'>
+  </path>
+  <path
+          id='path1'
+          d='M 0 0 L 100 100'>
+    <animate
+            id='a1'
+            attributeName='opacity'
+            begin='0ms'
+            end='2000ms'
+            from='0'
+            to='1'
+            keyTimes='0; 1'/>
+    <animate
+            id='a2'
+            attributeName='opacity'
+            begin='a1.begin'
+            end='a1.end'
+            from='0'
+            to='1'
+            keyTimes='0; 1'/>
+    <animate
+            id='a3'
+            attributeName='opacity'
+            begin='a2.begin 1000ms'
+            end='a1.end -100ms'
+            from='0'
+            to='1'
+            keyTimes='0; 1'/>
+    <animate
+            id='a4'
+            attributeName='opacity'
+            begin='gpa:states(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63, 0) 1000ms'
+            end='gpa:states(0 1, 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63) -100ms'
+            from='0'
+            to='1'
+            keyTimes='0; 1'/>
+    <animate
+            id='a5'
+            attributeName='opacity'
+            begin='gpa:states(none, all)'
+            end='gpa:states(none, all)'
+            from='0'
+            to='1'
+            keyTimes='0; 1'/>
+  </path>
+</svg>

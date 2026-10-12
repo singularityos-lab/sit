@@ -1,0 +1,22 @@
+<svg
+        xmlns='http://www.w3.org/2000/svg'
+        xmlns:svg='http://www.w3.org/2000/svg'
+        xmlns:gpa='https://www.gtk.org/grappa'
+        gpa:version='1'
+        gpa:state-names='zero empty'
+        gpa:state='0'
+        width='16'
+        height='16'>
+  <path
+          id='path0'
+          fill='url(#gpa:accent) rgb(0,34,255)'
+          stroke='url(#gpa:foreground) rgb(0,0,0)'
+          stroke-width='2'
+          d='M 0 0 L 100 100'
+          gpa:stroke-minwidth='1'
+          gpa:stroke-maxwidth='3'
+          class='foreground foreground-fill foreground-stroke'
+          gpa:stroke='foreground'
+          gpa:fill='accent'>
+  </path>
+</svg>

@@ -1,0 +1,41 @@
+#ifdef GSK_PREAMBLE
+graphene_rect_t rect;
+GdkColor color;
+#endif /* GSK_PREAMBLE */
+
+#include "gskgpucolorinstance.glsl"
+
+PASS(0) vec2 _pos;
+PASS_FLAT(1) Rect _rect;
+PASS_FLAT(2) vec4 _color;
+
+
+#ifdef GSK_VERTEX_SHADER
+
+void
+run (out vec2 pos)
+{
+  Rect r = rect_from_gsk (in_rect);
+  
+  pos = rect_get_position (r);
+
+  _pos = pos;
+  _rect = r;
+  _color = output_color_from_alt (in_color);
+}
+
+#endif
+
+
+
+#ifdef GSK_FRAGMENT_SHADER
+
+void
+run (out vec4 color,
+     out vec2 position)
+{
+  color = output_color_alpha (_color, rect_coverage (_rect, _pos));
+  position = _pos;
+}
+
+#endif

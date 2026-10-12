@@ -1,0 +1,12 @@
+color {
+  bounds: 0 0 100 20;
+  color: rgb(255,192,203);
+}
+color {
+  bounds: 0 25 100 30;
+  color: rgb(255,192,203);
+}
+color {
+  bounds: 0 60 100 40;
+  color: rgb(255,192,203);
+}
