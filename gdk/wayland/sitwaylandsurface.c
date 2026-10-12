@@ -10,6 +10,7 @@ struct _SitWaylandSurfaceEffect
   SitBackgroundEffect mode;
   cairo_region_t *region;
   guint strength;
+  guint corner_radius;
   gboolean dirty;
 };
 
@@ -76,7 +77,7 @@ sit_wayland_surface_set_background_effect_region (GdkSurface           *surface,
 
   g_return_val_if_fail (GDK_IS_WAYLAND_SURFACE (surface), FALSE);
   g_return_val_if_fail (mode >= SIT_BACKGROUND_EFFECT_DISABLED &&
-                        mode <= SIT_BACKGROUND_EFFECT_BLUR, FALSE);
+                        mode <= SIT_BACKGROUND_EFFECT_LIQUID, FALSE);
   g_return_val_if_fail (region == NULL ||
                         cairo_region_status (region) == CAIRO_STATUS_SUCCESS, FALSE);
 
@@ -113,6 +114,45 @@ sit_wayland_surface_set_background_effect_region (GdkSurface           *surface,
   return TRUE;
 }
 
+/**
+ * sit_wayland_surface_set_background_effect_corner_radius:
+ * @surface: a Wayland surface
+ * @radius: the corner radius of every connected part of the material region
+ *
+ * Queues the corner radius used by refractive materials for the next
+ * surface update. Compositors older than protocol version 5 ignore it.
+ *
+ * Returns: %TRUE if the compositor supports background materials
+ */
+gboolean
+sit_wayland_surface_set_background_effect_corner_radius (GdkSurface *surface,
+                                                         guint       radius)
+{
+  GdkWaylandSurface *self;
+  GdkWaylandDisplay *display;
+
+  g_return_val_if_fail (GDK_IS_WAYLAND_SURFACE (surface), FALSE);
+
+  if (gdk_surface_is_destroyed (surface))
+    return FALSE;
+
+  self = GDK_WAYLAND_SURFACE (surface);
+  display = GDK_WAYLAND_DISPLAY (gdk_surface_get_display (surface));
+  if (display->background_effect_manager == NULL)
+    return FALSE;
+
+  if (self->background_effect == NULL)
+    self->background_effect = g_new0 (SitWaylandSurfaceEffect, 1);
+  if (self->background_effect->corner_radius == radius)
+    return TRUE;
+
+  self->background_effect->corner_radius = radius;
+  self->background_effect->dirty = TRUE;
+  gdk_surface_queue_render (surface);
+
+  return TRUE;
+}
+
 void
 sit_wayland_surface_sync_background_effect (GdkWaylandSurface *self)
 {
@@ -138,9 +178,16 @@ sit_wayland_surface_sync_background_effect (GdkWaylandSurface *self)
     {
       struct wl_region *region = NULL;
 
-      zsingularity_blur_v1_set_mode (effect->proxy, effect->mode);
+      SitBackgroundEffect mode = effect->mode;
+
+      if (mode == SIT_BACKGROUND_EFFECT_LIQUID &&
+          version < ZSINGULARITY_BLUR_V1_SET_CORNER_RADIUS_SINCE_VERSION)
+        mode = SIT_BACKGROUND_EFFECT_GLASS;
+      zsingularity_blur_v1_set_mode (effect->proxy, mode);
       if (version >= ZSINGULARITY_BLUR_V1_SET_STRENGTH_SINCE_VERSION)
         zsingularity_blur_v1_set_strength (effect->proxy, effect->strength);
+      if (version >= ZSINGULARITY_BLUR_V1_SET_CORNER_RADIUS_SINCE_VERSION)
+        zsingularity_blur_v1_set_corner_radius (effect->proxy, effect->corner_radius);
 
       if (effect->region != NULL)
         {

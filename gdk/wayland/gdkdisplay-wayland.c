@@ -751,7 +751,7 @@ gdk_registry_handle_global (void               *data,
     {
       display_wayland->background_effect_manager =
         wl_registry_bind (registry, id, &zsingularity_blur_manager_v1_interface,
-                          MIN (version, 4));
+                          MIN (version, 5));
       display_wayland->background_effect_manager_id = id;
     }
 

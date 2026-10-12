@@ -12,7 +12,8 @@ typedef enum
 {
   SIT_BACKGROUND_EFFECT_DISABLED,
   SIT_BACKGROUND_EFFECT_GLASS,
-  SIT_BACKGROUND_EFFECT_BLUR
+  SIT_BACKGROUND_EFFECT_BLUR,
+  SIT_BACKGROUND_EFFECT_LIQUID
 } SitBackgroundEffect;
 
 GDK_AVAILABLE_IN_ALL
@@ -26,5 +27,9 @@ gboolean sit_wayland_surface_set_background_effect_region (GdkSurface           
                                                            SitBackgroundEffect   mode,
                                                            const cairo_region_t *region,
                                                            guint                 strength);
+
+GDK_AVAILABLE_IN_ALL
+gboolean sit_wayland_surface_set_background_effect_corner_radius (GdkSurface *surface,
+                                                                  guint       radius);
 
 G_END_DECLS
