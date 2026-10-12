@@ -35,6 +35,7 @@
 #include <gdk/wayland/gdkwaylandpopup.h>
 #include <gdk/wayland/gdkwaylandseat.h>
 #include <gdk/wayland/gdkwaylandsurface.h>
+#include <gdk/wayland/sitwaylandsurface.h>
 #include <gdk/wayland/gdkwaylandtoplevel.h>
 
 #undef __GDKWAYLAND_H_INSIDE__

@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include "gtkwindowprivate.h"
+#include "sit.h"
 
 #include "gtkaccessibleprivate.h"
 #include "gtkapplicationprivate.h"
@@ -77,6 +78,7 @@
 #include <errno.h>
 #include <graphene.h>
 #include <limits.h>
+#include <math.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -236,6 +238,16 @@ typedef struct
   GtkWidget *title_box;
   GtkWidget *titlebar;
   GtkWidget *key_press_focus;
+
+  GtkWidget *sit_border_widget;
+  cairo_region_t *sit_input_region;
+  GskRoundedRect sit_input_box;
+  double sit_input_x;
+  double sit_input_y;
+  int sit_input_width;
+  int sit_input_height;
+  guint sit_input_edges;
+  GtkBorder sit_input_handle;
 
   GdkMonitor *initial_fullscreen_monitor;
   guint      edge_constraints;
@@ -1531,106 +1543,112 @@ get_box_border (GtkCssStyle *style,
   border->right = get_number (style->border->border_right_width) + get_number (style->size->padding_right);
 }
 
-static int
-get_edge_for_coordinates (GtkWindow *window,
-                          double     x,
-                          double     y)
+static guint
+get_resize_edges (GtkWindow *window)
 {
   GtkWindowPrivate *priv = gtk_window_get_instance_private (window);
-  gboolean supports_edge_constraints;
-  GtkBorder handle_size;
-  GtkCssBoxes css_boxes;
-  const graphene_rect_t *border_rect;
-  float left, top;
-  const GskRoundedRect *border;
+  gboolean constraints;
+  guint edges = 0;
+
+  if (!priv->client_decorated || !priv->resizable || priv->fullscreen || priv->maximized)
+    return 0;
+
+  constraints = gdk_toplevel_supports_edge_constraints (GDK_TOPLEVEL (priv->surface));
+  if (!constraints && priv->tiled)
+    return 0;
+
+  for (int edge = GDK_SURFACE_EDGE_NORTH_WEST; edge <= GDK_SURFACE_EDGE_SOUTH_EAST; edge++)
+    if (!constraints || (priv->edge_constraints & constraints_for_edge (edge)) == constraints_for_edge (edge))
+      edges |= 1u << edge;
+
+  return edges;
+}
+
+static void
+get_resize_handle (GtkWindow *window,
+                   GtkBorder *handle_size)
+{
+  GtkWindowPrivate *priv = gtk_window_get_instance_private (window);
+
+  get_box_border (gtk_css_node_get_style (gtk_widget_get_css_node (GTK_WIDGET (window))),
+                  handle_size);
+  if (priv->use_client_shadow)
+    {
+      GtkBorder shadow;
+
+      get_shadow_width (window, &shadow);
+      handle_size->left += shadow.left;
+      handle_size->top += shadow.top;
+      handle_size->right += shadow.right;
+      handle_size->bottom += shadow.bottom;
+    }
+}
+
+static int
+edge_for_border (const GskRoundedRect *border,
+                 const GtkBorder      *handle_size,
+                 guint                 edges,
+                 double                x,
+                 double                y)
+{
+  const graphene_rect_t *border_rect = &border->bounds;
   graphene_point_t p;
-  int resize_handle_size;
+  float left, top;
+  int resize_handle_size = RESIZE_HANDLE_CORNER_SIZE;
 
-#define edge_or_minus_one(edge) ((supports_edge_constraints && (priv->edge_constraints & constraints_for_edge (edge)) != constraints_for_edge (edge)) ? -1 : edge)
+#define edge_or_minus_one(edge) ((edges & (1u << (edge))) ? (int)(edge) : -1)
 
-  if (!priv->client_decorated ||
-      !priv->resizable ||
-      priv->fullscreen ||
-      priv->maximized)
-    return -1;
-
-  supports_edge_constraints = gdk_toplevel_supports_edge_constraints (GDK_TOPLEVEL (priv->surface));
-
-  if (!supports_edge_constraints && priv->tiled)
-    return -1;
-
-  gtk_css_boxes_init (&css_boxes, GTK_WIDGET (window));
-  border = gtk_css_boxes_get_content_box (&css_boxes);
-  border_rect = gtk_css_boxes_get_content_rect (&css_boxes);
-
-  resize_handle_size = RESIZE_HANDLE_CORNER_SIZE;
-  for (int i = 0 ; i < 4; i++)
+  for (int i = 0; i < 4; i++)
     {
       resize_handle_size = MAX (resize_handle_size, border->corner[i].width);
       resize_handle_size = MAX (resize_handle_size, border->corner[i].height);
     }
 
-  get_box_border (gtk_css_node_get_style (gtk_widget_get_css_node (GTK_WIDGET (window))),
-                  &handle_size);
-
-  if (priv->use_client_shadow)
-    {
-      /* We use a maximum of RESIZE_HANDLE_SIZE pixels for the handle size */
-      GtkBorder shadow;
-
-      get_shadow_width (window, &shadow);
-      /* This logic is duplicated in update_realized_window_properties() */
-      handle_size.left += shadow.left;
-      handle_size.top += shadow.top;
-      handle_size.right += shadow.right;
-      handle_size.bottom += shadow.bottom;
-    }
-
   left = border_rect->origin.x;
   top = border_rect->origin.y;
 
-  if (x < left && x >= left - handle_size.left)
+  if (x < left && x >= left - handle_size->left)
     {
-      if (y < top + resize_handle_size && y >= top - handle_size.top)
+      if (y < top + resize_handle_size && y >= top - handle_size->top)
         return edge_or_minus_one (GDK_SURFACE_EDGE_NORTH_WEST);
 
       if (y > top + border_rect->size.height - resize_handle_size &&
-          y <= top + border_rect->size.height + handle_size.bottom)
+          y <= top + border_rect->size.height + handle_size->bottom)
         return edge_or_minus_one (GDK_SURFACE_EDGE_SOUTH_WEST);
 
       return edge_or_minus_one (GDK_SURFACE_EDGE_WEST);
     }
   else if (x > left + border_rect->size.width &&
-           x <= left + border_rect->size.width + handle_size.right)
+           x <= left + border_rect->size.width + handle_size->right)
     {
-      if (y < top + resize_handle_size  && y >= top - handle_size.top)
+      if (y < top + resize_handle_size  && y >= top - handle_size->top)
         return edge_or_minus_one (GDK_SURFACE_EDGE_NORTH_EAST);
 
       if (y > top + border_rect->size.height - resize_handle_size &&
-          y <= top + border_rect->size.height + handle_size.bottom)
+          y <= top + border_rect->size.height + handle_size->bottom)
         return edge_or_minus_one (GDK_SURFACE_EDGE_SOUTH_EAST);
 
       return edge_or_minus_one (GDK_SURFACE_EDGE_EAST);
     }
-  else if (y < top && y >= top - handle_size.top)
+  else if (y < top && y >= top - handle_size->top)
     {
-      if (x < left + resize_handle_size && x >= left - handle_size.left)
+      if (x < left + resize_handle_size && x >= left - handle_size->left)
         return edge_or_minus_one (GDK_SURFACE_EDGE_NORTH_WEST);
 
       if (x > left + border_rect->size.width - resize_handle_size &&
-          x <= left + border_rect->size.width + handle_size.right)
+          x <= left + border_rect->size.width + handle_size->right)
         return edge_or_minus_one (GDK_SURFACE_EDGE_NORTH_EAST);
 
       return edge_or_minus_one (GDK_SURFACE_EDGE_NORTH);
     }
   else if (y > top + border_rect->size.height &&
-           y <= top + border_rect->size.height + handle_size.bottom)
+           y <= top + border_rect->size.height + handle_size->bottom)
     {
-      if (x < left + resize_handle_size && x >= left - handle_size.left)
+      if (x < left + resize_handle_size && x >= left - handle_size->left)
         return edge_or_minus_one (GDK_SURFACE_EDGE_SOUTH_WEST);
 
       if (x > left + border_rect->size.width - resize_handle_size &&
-          x <= left + border_rect->size.width + handle_size.right)
+          x <= left + border_rect->size.width + handle_size->right)
         return edge_or_minus_one (GDK_SURFACE_EDGE_SOUTH_EAST);
 
       return edge_or_minus_one (GDK_SURFACE_EDGE_SOUTH);
@@ -1653,6 +1671,31 @@ get_edge_for_coordinates (GtkWindow *window,
     }
 
   return -1;
+
+#undef edge_or_minus_one
+}
+
+static int
+get_edge_for_coordinates (GtkWindow *window,
+                          double     x,
+                          double     y)
+{
+  GtkCssBoxes css_boxes;
+  GskRoundedRect sit_border;
+  const GskRoundedRect *border;
+  GtkBorder handle_size;
+  guint edges = get_resize_edges (window);
+
+  if (edges == 0)
+    return -1;
+
+  gtk_css_boxes_init (&css_boxes, GTK_WIDGET (window));
+  border = gtk_css_boxes_get_content_box (&css_boxes);
+  if (_gtk_window_get_border_box (window, &sit_border))
+    border = &sit_border;
+  get_resize_handle (window, &handle_size);
+
+  return edge_for_border (border, &handle_size, edges, x, y);
 }
 
 static void
@@ -2735,6 +2778,9 @@ gtk_window_dispose (GObject *object)
   g_clear_object (&priv->move_focus_widget);
   gtk_window_set_focus (window, NULL);
   gtk_window_set_default_widget (window, NULL);
+
+  _gtk_window_set_border_widget (window, NULL);
+  g_clear_pointer (&priv->sit_input_region, cairo_region_destroy);
 
   g_clear_pointer (&priv->child, gtk_widget_unparent);
   unset_titlebar (window);
@@ -4211,6 +4257,177 @@ out:
 }
 
 static void
+border_widget_destroyed (gpointer data,
+                         GObject *object)
+{
+  GtkWindow *window = data;
+  GtkWindowPrivate *priv = gtk_window_get_instance_private (window);
+
+  priv->sit_border_widget = NULL;
+  gtk_widget_queue_draw (GTK_WIDGET (window));
+}
+
+gboolean
+_gtk_window_set_border_widget (GtkWindow *window,
+                               GtkWidget *widget)
+{
+  GtkWindowPrivate *priv;
+
+  g_return_val_if_fail (GTK_IS_WINDOW (window), FALSE);
+  g_return_val_if_fail (widget == NULL || GTK_IS_WIDGET (widget), FALSE);
+
+  if (widget != NULL &&
+      (widget == GTK_WIDGET (window) ||
+       gtk_widget_get_native (widget) != GTK_NATIVE (window) ||
+       !gtk_widget_is_ancestor (widget, GTK_WIDGET (window))))
+    return FALSE;
+
+  priv = gtk_window_get_instance_private (window);
+  if (priv->sit_border_widget == widget)
+    return TRUE;
+
+  if (priv->sit_border_widget != NULL)
+    g_object_weak_unref (G_OBJECT (priv->sit_border_widget), border_widget_destroyed, window);
+  priv->sit_border_widget = widget;
+  if (widget != NULL)
+    g_object_weak_ref (G_OBJECT (widget), border_widget_destroyed, window);
+  g_clear_pointer (&priv->sit_input_region, cairo_region_destroy);
+
+  gtk_widget_queue_draw (GTK_WIDGET (window));
+  return TRUE;
+}
+
+void
+_gtk_window_invalidate_border_region (GtkWindow *window,
+                                      GtkWidget *widget)
+{
+  GtkWindowPrivate *priv = gtk_window_get_instance_private (window);
+
+  if (priv->sit_border_widget != NULL &&
+      (priv->sit_border_widget == widget ||
+       gtk_widget_is_ancestor (priv->sit_border_widget, widget)))
+    g_clear_pointer (&priv->sit_input_region, cairo_region_destroy);
+}
+
+gboolean
+_gtk_window_get_border_box (GtkWindow      *window,
+                            GskRoundedRect *box)
+{
+  GtkWindowPrivate *priv = gtk_window_get_instance_private (window);
+  GtkWidget *widget = priv->sit_border_widget;
+  graphene_matrix_t matrix;
+  GskRoundedRect border;
+  double xx, yx, xy, yy, dx, dy;
+  double x, y, width, height;
+  unsigned flip;
+
+  if (widget == NULL || !gtk_widget_get_mapped (widget) ||
+      gtk_widget_get_native (widget) != GTK_NATIVE (window) ||
+      !gtk_widget_compute_transform (widget, GTK_WIDGET (window), &matrix) ||
+      !graphene_matrix_to_2d (&matrix, &xx, &yx, &xy, &yy, &dx, &dy) ||
+      xy != 0 || yx != 0 || xx == 0 || yy == 0 ||
+      !isfinite (xx) || !isfinite (yy) || !isfinite (dx) || !isfinite (dy))
+    return FALSE;
+
+  sit_widget_get_border_box (widget, &border);
+  if (border.bounds.size.width <= 0 || border.bounds.size.height <= 0)
+    return FALSE;
+
+  x = border.bounds.origin.x * xx + dx;
+  y = border.bounds.origin.y * yy + dy;
+  width = border.bounds.size.width * xx;
+  height = border.bounds.size.height * yy;
+  box->bounds = GRAPHENE_RECT_INIT (MIN (x, x + width), MIN (y, y + height),
+                                   fabs (width), fabs (height));
+  flip = (xx < 0 ? 1 : 0) ^ (yy < 0 ? 3 : 0);
+  for (unsigned i = 0; i < 4; i++)
+    {
+      box->corner[i].width = border.corner[i ^ flip].width * fabs (xx);
+      box->corner[i].height = border.corner[i ^ flip].height * fabs (yy);
+      if (!isfinite (box->corner[i].width) || !isfinite (box->corner[i].height))
+        return FALSE;
+    }
+
+  return isfinite (box->bounds.origin.x) && isfinite (box->bounds.origin.y) &&
+         isfinite (box->bounds.size.width) && isfinite (box->bounds.size.height);
+}
+
+static void
+add_resize_input (GtkWindow            *window,
+                  cairo_region_t       *region,
+                  const GskRoundedRect *box,
+                  double                native_x,
+                  double                native_y,
+                  guint                 edges,
+                  const GtkBorder      *handle_size)
+{
+  GtkWindowPrivate *priv = gtk_window_get_instance_private (window);
+  double left = box->bounds.origin.x + native_x;
+  double top = box->bounds.origin.y + native_y;
+  double right = left + box->bounds.size.width;
+  double bottom = top + box->bounds.size.height;
+  int width = gdk_surface_get_width (priv->surface);
+  int height = gdk_surface_get_height (priv->surface);
+  int first = CLAMP (ceil (top - RESIZE_HANDLE_SIZE - 0.5), 0, height);
+  int last = CLAMP (ceil (bottom + RESIZE_HANDLE_SIZE - 0.5), 0, height);
+  int x1 = CLAMP (ceil (left - RESIZE_HANDLE_SIZE - 0.5), 0, width);
+  int x2 = CLAMP (ceil (right + RESIZE_HANDLE_SIZE - 0.5), 0, width);
+  if (edges == 0xff &&
+      handle_size->left >= RESIZE_HANDLE_SIZE && handle_size->right >= RESIZE_HANDLE_SIZE &&
+      handle_size->top >= RESIZE_HANDLE_SIZE && handle_size->bottom >= RESIZE_HANDLE_SIZE &&
+      floor (left) == left && floor (top) == top &&
+      floor (right) == right && floor (bottom) == bottom)
+    {
+      cairo_rectangle_int_t outer = { x1, first, x2 - x1, last - first };
+      int bx1 = CLAMP (left, 0, width);
+      int by1 = CLAMP (top, 0, height);
+      int bx2 = CLAMP (right, 0, width);
+      int by2 = CLAMP (bottom, 0, height);
+      cairo_rectangle_int_t inner = { bx1, by1, bx2 - bx1, by2 - by1 };
+      cairo_region_t *handles = cairo_region_create_rectangle (&outer);
+
+      cairo_region_subtract_rectangle (handles, &inner);
+      cairo_region_union (region, handles);
+      cairo_region_destroy (handles);
+      return;
+    }
+
+  for (int y = first; y < last; y++)
+    {
+      int start[2] = { x1, CLAMP (ceil (right - 0.5), x1, x2) };
+      int end[2] = { CLAMP (ceil (left - 0.5), x1, x2), x2 };
+      int n = 2;
+
+      if (y + 0.5 < top || y + 0.5 >= bottom)
+        {
+          end[0] = x2;
+          n = 1;
+        }
+
+      for (int i = 0; i < n; i++)
+        {
+          int run = -1;
+
+          for (int x = start[i]; x <= end[i]; x++)
+            {
+              gboolean resize = x < end[i] &&
+                edge_for_border (box, handle_size, edges, x + 0.5 - native_x,
+                                  y + 0.5 - native_y) != -1;
+
+              if (resize && run < 0)
+                run = x;
+              else if (!resize && run >= 0)
+                {
+                  cairo_rectangle_int_t rect = { run, y, x - run, 1 };
+                  cairo_region_union_rectangle (region, &rect);
+                  run = -1;
+                }
+            }
+        }
+    }
+}
+
+static void
 update_realized_window_properties (GtkWindow *window)
 {
   GtkWindowPrivate *priv = gtk_window_get_instance_private (window);
@@ -4219,10 +4436,65 @@ update_realized_window_properties (GtkWindow *window)
   const graphene_rect_t *border_rect;
   double native_x, native_y;
 
-  if (!priv->client_decorated || !priv->use_client_shadow)
+  GskRoundedRect border;
+
+  if (priv->surface == NULL)
     return;
 
   gtk_native_get_surface_transform (GTK_NATIVE (window), &native_x, &native_y);
+
+  if (_gtk_window_get_border_box (window, &border))
+    {
+      cairo_region_t *region;
+      guint edges = get_resize_edges (window);
+      int width = gdk_surface_get_width (priv->surface);
+      int height = gdk_surface_get_height (priv->surface);
+      GtkBorder handle_size = { 0 };
+
+      if (edges != 0)
+        get_resize_handle (window, &handle_size);
+
+      if (priv->sit_input_region != NULL &&
+          gsk_rounded_rect_equal (&border, &priv->sit_input_box) &&
+          native_x == priv->sit_input_x && native_y == priv->sit_input_y &&
+          width == priv->sit_input_width && height == priv->sit_input_height &&
+          edges == priv->sit_input_edges &&
+          handle_size.left == priv->sit_input_handle.left &&
+          handle_size.top == priv->sit_input_handle.top &&
+          handle_size.right == priv->sit_input_handle.right &&
+          handle_size.bottom == priv->sit_input_handle.bottom)
+        return;
+
+      region = sit_widget_create_border_region (priv->sit_border_widget, NULL, NULL);
+      if (region != NULL)
+        {
+          if (edges != 0)
+            add_resize_input (window, region, &border, native_x, native_y, edges, &handle_size);
+          gdk_surface_set_input_region (priv->surface, region);
+          g_clear_pointer (&priv->sit_input_region, cairo_region_destroy);
+          priv->sit_input_region = region;
+          priv->sit_input_box = border;
+          priv->sit_input_x = native_x;
+          priv->sit_input_y = native_y;
+          priv->sit_input_width = width;
+          priv->sit_input_height = height;
+          priv->sit_input_edges = edges;
+          priv->sit_input_handle = handle_size;
+          return;
+        }
+    }
+
+  if (!priv->client_decorated || !priv->use_client_shadow)
+    {
+      if (priv->sit_input_region != NULL)
+        {
+          gdk_surface_set_input_region (priv->surface, NULL);
+          g_clear_pointer (&priv->sit_input_region, cairo_region_destroy);
+        }
+      return;
+    }
+
+  g_clear_pointer (&priv->sit_input_region, cairo_region_destroy);
 
   /* update the input shape, which makes it so that clicks
    * outside the border windows go through. */
@@ -4242,6 +4514,19 @@ update_realized_window_properties (GtkWindow *window)
       gdk_surface_set_input_region (priv->surface, region);
       cairo_region_destroy (region);
     }
+}
+
+gboolean
+_gtk_window_update_border_geometry (GtkWindow      *window,
+                                    GskRoundedRect *box)
+{
+  GtkWindowPrivate *priv = gtk_window_get_instance_private (window);
+
+  if (priv->sit_border_widget == NULL && priv->sit_input_region == NULL)
+    return FALSE;
+
+  update_realized_window_properties (window);
+  return _gtk_window_get_border_box (window, box);
 }
 
 /* NB: When orientation is VERTICAL, width/height are flipped.
@@ -4597,6 +4882,8 @@ gtk_window_unrealize (GtkWidget *widget)
   GdkFrameClock *frame_clock;
 
   gtk_native_unrealize (GTK_NATIVE (window));
+
+  g_clear_pointer (&priv->sit_input_region, cairo_region_destroy);
 
   /* On unrealize, we reset the size of the window such
    * that we will re-apply the default sizing stuff

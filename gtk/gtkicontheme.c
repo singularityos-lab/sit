@@ -602,7 +602,7 @@ icon_key_equal (gconstpointer _a,
  * so that we can avoid reloading these constantly.
  *
  * We put paintables on the lru list when we get a cache hit. Once
- * they fall off the lru list, finalizing the paintable will remove
+ * they fall off the lru list, disposing the paintable will remove
  * the icon from the cache.
  */
 

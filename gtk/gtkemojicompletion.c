@@ -66,11 +66,17 @@ static int populate_completion (GtkEmojiCompletion *completion,
 G_DEFINE_TYPE (GtkEmojiCompletion, gtk_emoji_completion, GTK_TYPE_POPOVER)
 
 static void
+gtk_emoji_completion_dispose (GObject *object)
+{
+  disconnect_signals (GTK_EMOJI_COMPLETION (object));
+
+  G_OBJECT_CLASS (gtk_emoji_completion_parent_class)->dispose (object);
+}
+
+static void
 gtk_emoji_completion_finalize (GObject *object)
 {
   GtkEmojiCompletion *completion = GTK_EMOJI_COMPLETION (object);
-
-  disconnect_signals (completion);
 
   g_free (completion->text);
   g_variant_unref (completion->data);
@@ -84,6 +90,10 @@ update_completion (GtkEmojiCompletion *completion)
   const char *text;
   guint length;
   guint n_matches;
+
+  if (completion->entry == NULL ||
+      gtk_widget_get_parent (GTK_WIDGET (completion)) != GTK_WIDGET (completion->entry))
+    return;
 
   n_matches = 0;
 
@@ -137,20 +147,35 @@ static void
 emoji_activated (GtkWidget          *row,
                  GtkEmojiCompletion *completion)
 {
+  GtkText *entry;
   const char *emoji;
   guint length;
+  gulong changed_id;
+
+  if (completion->entry == NULL ||
+      gtk_widget_get_parent (GTK_WIDGET (completion)) != GTK_WIDGET (completion->entry))
+    return;
+
+  entry = g_object_ref (completion->entry);
+  g_object_ref (completion);
+  changed_id = completion->changed_id;
 
   gtk_popover_popdown (GTK_POPOVER (completion));
 
   emoji = (const char *)g_object_get_data (G_OBJECT (row), "text");
 
-  g_signal_handler_block (completion->entry, completion->changed_id);
+  if (g_signal_handler_is_connected (entry, changed_id))
+    g_signal_handler_block (entry, changed_id);
 
-  length = g_utf8_strlen (gtk_editable_get_text (GTK_EDITABLE (completion->entry)), -1);
-  gtk_editable_select_region (GTK_EDITABLE (completion->entry), length - completion->length, length);
-  gtk_text_enter_text (completion->entry, emoji);
+  length = g_utf8_strlen (gtk_editable_get_text (GTK_EDITABLE (entry)), -1);
+  gtk_editable_select_region (GTK_EDITABLE (entry), length - completion->length, length);
+  gtk_text_enter_text (entry, emoji);
 
-  g_signal_handler_unblock (completion->entry, completion->changed_id);
+  if (g_signal_handler_is_connected (entry, changed_id))
+    g_signal_handler_unblock (entry, changed_id);
+
+  g_object_unref (entry);
+  g_object_unref (completion);
 }
 
 static void
@@ -297,7 +322,9 @@ key_press_cb (GtkEventControllerKey *key,
               GdkModifierType        modifiers,
               GtkEmojiCompletion    *completion)
 {
-  if (!gtk_widget_get_visible (GTK_WIDGET (completion)))
+  if (completion->entry == NULL ||
+      gtk_widget_get_parent (GTK_WIDGET (completion)) != GTK_WIDGET (completion->entry) ||
+      !gtk_widget_get_visible (GTK_WIDGET (completion)))
     return FALSE;
 
   if (keyval == GDK_KEY_Escape)
@@ -374,12 +401,13 @@ connect_signals (GtkEmojiCompletion *completion,
 {
   GtkEventController *key_controller;
 
-  completion->entry = g_object_ref (entry);
+  completion->entry = entry;
+  g_object_add_weak_pointer (G_OBJECT (entry), (gpointer *) &completion->entry);
   key_controller = gtk_text_get_key_controller (entry);
 
-  g_signal_connect (key_controller, "key-pressed", G_CALLBACK (key_press_cb), completion);
-  completion->changed_id = g_signal_connect (entry, "changed", G_CALLBACK (changed_cb), completion);
-  g_signal_connect (entry, "notify::has-focus", G_CALLBACK (focus_out_cb), completion);
+  g_signal_connect_object (key_controller, "key-pressed", G_CALLBACK (key_press_cb), completion, 0);
+  completion->changed_id = g_signal_connect_object (entry, "changed", G_CALLBACK (changed_cb), completion, 0);
+  g_signal_connect_object (entry, "notify::has-focus", G_CALLBACK (focus_out_cb), completion, 0);
 }
 
 static void
@@ -387,13 +415,27 @@ disconnect_signals (GtkEmojiCompletion *completion)
 {
   GtkEventController *key_controller;
 
+  if (completion->entry == NULL)
+    return;
+
   key_controller = gtk_text_get_key_controller (completion->entry);
 
   g_signal_handlers_disconnect_by_func (completion->entry, changed_cb, completion);
   g_signal_handlers_disconnect_by_func (key_controller, key_press_cb, completion);
   g_signal_handlers_disconnect_by_func (completion->entry, focus_out_cb, completion);
 
-  g_clear_object (&completion->entry);
+  g_object_remove_weak_pointer (G_OBJECT (completion->entry), (gpointer *) &completion->entry);
+  completion->entry = NULL;
+  completion->changed_id = 0;
+}
+
+static void
+parent_notify_cb (GtkEmojiCompletion *completion,
+                  GParamSpec         *pspec,
+                  gpointer            data)
+{
+  if (gtk_widget_get_parent (GTK_WIDGET (completion)) != GTK_WIDGET (completion->entry))
+    disconnect_signals (completion);
 }
 
 static gboolean
@@ -586,6 +628,8 @@ populate_completion (GtkEmojiCompletion *completion,
               n_added++;
             }
         }
+
+      g_variant_unref (item);
     }
 
   completion->n_matches = n_matches;
@@ -639,6 +683,7 @@ gtk_emoji_completion_class_init (GtkEmojiCompletionClass *klass)
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
 
+  object_class->dispose = gtk_emoji_completion_dispose;
   object_class->finalize = gtk_emoji_completion_finalize;
 
   gtk_widget_class_set_template_from_resource (widget_class, "/org/gtk/libgtk/ui/gtkemojicompletion.ui");
@@ -657,6 +702,7 @@ gtk_emoji_completion_new (GtkText *text)
   gtk_widget_set_parent (GTK_WIDGET (completion), GTK_WIDGET (text));
 
   connect_signals (completion, text);
+  g_signal_connect (completion, "notify::parent", G_CALLBACK (parent_notify_cb), NULL);
 
   return GTK_WIDGET (completion);
 }

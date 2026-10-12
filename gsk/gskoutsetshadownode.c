@@ -89,7 +89,7 @@ gsk_outset_shadow_node_draw (GskRenderNode *node,
     return;
 
   _graphene_rect_init_from_clip_extents (&clip_rect, cr);
-  if (!gsk_rounded_rect_intersects_rect (&self->outline, &clip_rect))
+  if (!gsk_rect_intersects (&node->bounds, &clip_rect))
     return;
 
   blur_radius = self->blur_radius / 2;

@@ -74,6 +74,7 @@ struct _GtkConstraintGuide
    * to be freed.
    */
   GHashTable *bound_attributes;
+  GPtrArray *attribute_constraints;
 
   GtkConstraintRef *constraints[LAST_VALUE];
 };
@@ -122,6 +123,7 @@ gtk_constraint_guide_init (GtkConstraintGuide *guide)
     g_hash_table_new_full (g_str_hash, g_str_equal,
                            NULL,
                            (GDestroyNotify) gtk_constraint_variable_unref);
+  guide->attribute_constraints = g_ptr_array_new ();
 }
 
 static void
@@ -145,9 +147,9 @@ gtk_constraint_guide_update_constraint (GtkConstraintGuide *guide,
     }
 
   if (index == MIN_WIDTH || index == NAT_WIDTH || index == MAX_WIDTH)
-    var = gtk_constraint_layout_get_attribute (guide->layout, GTK_CONSTRAINT_ATTRIBUTE_WIDTH, "guide", NULL, guide->bound_attributes);
+    var = gtk_constraint_layout_get_attribute (guide->layout, GTK_CONSTRAINT_ATTRIBUTE_WIDTH, "guide", NULL, guide->bound_attributes, guide->attribute_constraints);
   else
-    var = gtk_constraint_layout_get_attribute (guide->layout, GTK_CONSTRAINT_ATTRIBUTE_HEIGHT, "guide", NULL, guide->bound_attributes);
+    var = gtk_constraint_layout_get_attribute (guide->layout, GTK_CONSTRAINT_ATTRIBUTE_HEIGHT, "guide", NULL, guide->bound_attributes, guide->attribute_constraints);
 
   /* We always install min-size constraints,
    * but we avoid nat-size constraints if min == max
@@ -165,11 +167,12 @@ gtk_constraint_guide_update_constraint (GtkConstraintGuide *guide,
   else if ((index == NAT_WIDTH && guide->values[MIN_WIDTH] != guide->values[MAX_WIDTH]) ||
       (index == NAT_HEIGHT && guide->values[MIN_HEIGHT] != guide->values[MAX_HEIGHT]))
     {
-      gtk_constraint_variable_set_value (var, guide->values[index]);
       guide->constraints[index] =
-        gtk_constraint_solver_add_stay_variable (solver,
-                                                 var,
-                                                 guide->strength);
+        gtk_constraint_solver_add_constraint (solver,
+                                              var,
+                                              GTK_CONSTRAINT_RELATION_EQ,
+                                              gtk_constraint_expression_new (guide->values[index]),
+                                              guide->strength);
     }
   else if ((index == MAX_WIDTH || index == MAX_HEIGHT) &&
            guide->values[index] < G_MAXINT)
@@ -216,7 +219,8 @@ gtk_constraint_guide_detach (GtkConstraintGuide *guide)
         }
     }
 
-  g_hash_table_remove_all (guide->bound_attributes);
+  gtk_constraint_layout_clear_attributes (guide->layout, guide->bound_attributes,
+                                          guide->attribute_constraints);
 }
 
 GtkConstraintVariable *
@@ -226,7 +230,7 @@ gtk_constraint_guide_get_attribute (GtkConstraintGuide     *guide,
   GtkLayoutManager *manager = GTK_LAYOUT_MANAGER (guide->layout);
   GtkWidget *widget = gtk_layout_manager_get_widget (manager);
 
-  return gtk_constraint_layout_get_attribute (guide->layout, attr, "guide", widget, guide->bound_attributes);
+  return gtk_constraint_layout_get_attribute (guide->layout, attr, "guide", widget, guide->bound_attributes, guide->attribute_constraints);
 }
 
 GtkConstraintLayout *
@@ -330,6 +334,7 @@ gtk_constraint_guide_finalize (GObject *object)
   g_free (self->name);
 
   g_clear_pointer (&self->bound_attributes, g_hash_table_unref);
+  g_clear_pointer (&self->attribute_constraints, g_ptr_array_unref);
 
   G_OBJECT_CLASS (gtk_constraint_guide_parent_class)->finalize (object);
 }

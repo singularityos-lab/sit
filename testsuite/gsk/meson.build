@@ -706,6 +706,7 @@ if os_linux
 endif
 
 tests = [
+  [ 'cairo-shadow' ],
   [ 'normalize', [ 'normalize.c', '../reftests/reftest-compare.c' ] ],
   [ 'shader' ],
   [ 'opaque' ],

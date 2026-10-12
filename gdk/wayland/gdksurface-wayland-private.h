@@ -24,6 +24,8 @@
 #include "gdkseat-wayland.h"
 
 
+typedef struct _SitWaylandSurfaceEffect SitWaylandSurfaceEffect;
+
 typedef enum _PopupState
 {
   POPUP_STATE_IDLE,
@@ -95,6 +97,8 @@ struct _GdkWaylandSurface
   uint32_t last_configure_serial;
 
   int state_freeze_count;
+
+  SitWaylandSurfaceEffect *background_effect;
 };
 
 typedef struct _GdkWaylandSurfaceClass GdkWaylandSurfaceClass;
@@ -162,6 +166,11 @@ void gdk_wayland_surface_inhibit_shortcuts (GdkSurface *surface,
                                            GdkSeat   *gdk_seat);
 void gdk_wayland_surface_restore_shortcuts (GdkSurface *surface,
                                            GdkSeat   *gdk_seat);
+
+void sit_wayland_surface_sync_background_effect (GdkWaylandSurface *surface);
+void sit_wayland_surface_clear_background_effect (GdkWaylandSurface *surface);
+void sit_wayland_surface_destroy_background_effect (GdkWaylandSurface *surface);
+gboolean sit_wayland_surface_background_effect_needs_commit (GdkWaylandSurface *surface);
 
 #define XDG_SHELL_CALL(obj,func,surface,...) \
   switch (GDK_WAYLAND_DISPLAY (gdk_surface_get_display (GDK_SURFACE (surface)))->shell_variant) \

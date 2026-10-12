@@ -365,10 +365,17 @@ gsk_cairo_blur_start_drawing (cairo_t         *cr,
 
   if (blur_flags & GSK_BLUR_REPEAT)
     {
+      /* Sample the constant axis inside the shape, away from clipped edges. */
       if (!blur_x)
-        clip_width = 1;
+        {
+          clip_width = 1;
+          clip_x1 = (clip_x1 + clip_x2) / 2;
+        }
       if (!blur_y)
-        clip_height = 1;
+        {
+          clip_height = 1;
+          clip_y1 = (clip_y1 + clip_y2) / 2;
+        }
     }
 
   /* Create a larger surface to center the blur. */

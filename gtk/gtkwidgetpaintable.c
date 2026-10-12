@@ -277,6 +277,8 @@ static GdkPaintable *
 gtk_widget_paintable_snapshot_widget (GtkWidgetPaintable *self)
 {
   graphene_rect_t bounds;
+  GskRenderNode *node;
+  GdkPaintable *paintable;
 
   if (self->widget == NULL)
     return gdk_paintable_new_empty (0, 0);
@@ -284,10 +286,13 @@ gtk_widget_paintable_snapshot_widget (GtkWidgetPaintable *self)
   if (!gtk_widget_compute_bounds (self->widget, self->widget, &bounds))
     return gdk_paintable_new_empty (0, 0);
 
-  if (self->widget->priv->render_node == NULL)
+  node = _gtk_widget_get_visual_node (self->widget);
+  if (node == NULL)
     return gdk_paintable_new_empty (bounds.size.width, bounds.size.height);
-  
-  return gtk_render_node_paintable_new (self->widget->priv->render_node, &bounds);
+
+  paintable = gtk_render_node_paintable_new (node, &bounds);
+  gsk_render_node_unref (node);
+  return paintable;
 }
 
 /**

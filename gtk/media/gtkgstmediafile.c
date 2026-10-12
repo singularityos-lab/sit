@@ -34,7 +34,6 @@ struct _GtkGstMediaFile
   GstPlaySignalAdapter *play_adapter;
   GdkPaintable *paintable;
   GstElement *playbin;
-  GtkGstBin *src;
 };
 
 struct _GtkGstMediaFileClass
@@ -44,6 +43,9 @@ struct _GtkGstMediaFileClass
 
 #define TO_GST_TIME(ts) ((ts) * (GST_SECOND / G_USEC_PER_SEC))
 #define FROM_GST_TIME(ts) ((ts) / (GST_SECOND / G_USEC_PER_SEC))
+
+static GQuark loop_quark;
+static GQuark source_quark;
 
 static void
 gtk_gst_media_file_paintable_snapshot (GdkPaintable *paintable,
@@ -142,19 +144,22 @@ gtk_gst_media_file_ensure_prepared (GtkGstMediaFile *self)
     }
 }
 
-#if GST_CHECK_VERSION (1,27, 90)
 static void
 gtk_gst_media_file_update_loop (GtkGstMediaFile *self)
 {
-  GstStructure *config;
-  gboolean loop;
-
-  config = gst_play_get_config (self->play);
-  loop = gtk_media_stream_get_loop (GTK_MEDIA_STREAM (self));
-  gst_play_config_set_loop (config, loop ? GST_PLAY_LOOP_TRACK : GST_PLAY_LOOP_NONE);
-  gst_play_set_config (self->play, config);
+  g_object_set_qdata (G_OBJECT (self->playbin), loop_quark,
+                      GINT_TO_POINTER (gtk_media_stream_get_loop (GTK_MEDIA_STREAM (self)) &&
+                                       gtk_media_stream_get_playing (GTK_MEDIA_STREAM (self))));
 }
-#endif
+
+static void
+gtk_gst_media_file_about_to_finish_cb (GstElement *playbin,
+                                      gpointer    data)
+{
+  /* This signal runs on a streaming thread, so don't access GTK objects. */
+  if (g_object_get_qdata (G_OBJECT (playbin), loop_quark))
+    g_object_set (playbin, "uri", "gtk-media-stream://", NULL);
+}
 
 static void
 gtk_gst_media_file_position_updated_cb (GstPlaySignalAdapter *adapter,
@@ -218,9 +223,7 @@ gtk_gst_media_file_end_of_stream_cb (GstPlaySignalAdapter *adapter,
 
   if (gtk_media_stream_get_loop (GTK_MEDIA_STREAM (self)))
     {
-#if !GST_CHECK_VERSION (1,27, 90)
       gst_play_seek (self->play, 0);
-#endif
       return;
     }
 
@@ -230,30 +233,34 @@ gtk_gst_media_file_end_of_stream_cb (GstPlaySignalAdapter *adapter,
 static void
 gtk_gst_media_file_source_setup_cb (GstElement      *playbin,
                                     GstElement      *source,
-                                    GtkGstMediaFile *self)
+                                    gpointer         data)
 {
-  GFile *file;
+  GObject *input;
   GInputStream *stream;
 
   g_return_if_fail (GTK_IS_GST_BIN (source));
 
-  self->src = GTK_GST_BIN (g_object_ref (source));
+  input = g_object_get_qdata (G_OBJECT (playbin), source_quark);
 
-  file = gtk_media_file_get_file (GTK_MEDIA_FILE (self));
-  stream = gtk_media_file_get_input_stream (GTK_MEDIA_FILE (self));
-
-  if (stream)
-    g_object_ref (stream);
-  else if (file)
-    stream = G_INPUT_STREAM (g_file_read (file, NULL, NULL));
+  if (G_IS_INPUT_STREAM (input))
+    stream = g_object_ref (G_INPUT_STREAM (input));
+  else if (G_IS_FILE (input))
+    stream = G_INPUT_STREAM (g_file_read (G_FILE (input), NULL, NULL));
   else
     stream = NULL;
 
   g_return_if_fail (stream != NULL);
 
-  gtk_gst_bin_set_stream (self->src, stream);
+  gtk_gst_bin_set_stream (GTK_GST_BIN (source), stream);
 
   g_clear_object (&stream);
+}
+
+static void
+gtk_gst_media_file_release_adapter (gpointer data,
+                                    GObject *object)
+{
+  g_object_unref (data);
 }
 
 static void
@@ -267,16 +274,30 @@ gtk_gst_media_file_destroy_play (GtkGstMediaFile *self)
   g_signal_handlers_disconnect_by_func (self->play_adapter, gtk_gst_media_file_end_of_stream_cb, self);
   g_signal_handlers_disconnect_by_func (self->play_adapter, gtk_gst_media_file_seek_done_cb, self);
   g_signal_handlers_disconnect_by_func (self->play_adapter, gtk_gst_media_file_error_cb, self);
-  g_signal_handlers_disconnect_by_func (self->playbin, gtk_gst_media_file_source_setup_cb, self);
-#if GST_CHECK_VERSION (1,27, 90)
+  g_signal_handlers_disconnect_by_func (self->playbin, gtk_gst_media_file_source_setup_cb, NULL);
   g_signal_handlers_disconnect_by_func (self, gtk_gst_media_file_update_loop, NULL);
-#endif
-  g_object_unref (self->play_adapter);
+  g_signal_handlers_disconnect_by_func (self->playbin, gtk_gst_media_file_about_to_finish_cb, NULL);
+  /* Keep the bus watched until queued messages release the player on this context. */
+  g_object_weak_ref (G_OBJECT (self->play), gtk_gst_media_file_release_adapter, self->play_adapter);
+  self->play_adapter = NULL;
   gst_play_stop (self->play);
   g_object_unref (self->play);
   g_object_unref (self->playbin);
-  g_object_unref (self->src);
   self->play = NULL;
+}
+
+static void
+gtk_gst_media_file_update_audio (GtkMediaStream *stream,
+                                 gboolean        muted,
+                                 double          volume)
+{
+  GtkGstMediaFile *self = GTK_GST_MEDIA_FILE (stream);
+
+  if (self->play == NULL)
+    return;
+
+  gst_play_set_mute (self->play, muted);
+  gst_play_set_volume (self->play, volume * volume * volume);
 }
 
 static void
@@ -288,6 +309,9 @@ gtk_gst_media_file_create_play (GtkGstMediaFile *file)
     return;
 
   self->play = gst_play_new (GST_PLAY_VIDEO_RENDERER (g_object_ref (self->paintable)));
+  gtk_gst_media_file_update_audio (GTK_MEDIA_STREAM (self),
+                                   gtk_media_stream_get_muted (GTK_MEDIA_STREAM (self)),
+                                   gtk_media_stream_get_volume (GTK_MEDIA_STREAM (self)));
   self->play_adapter = gst_play_signal_adapter_new (self->play);
   g_signal_connect (self->play_adapter, "media-info-updated", G_CALLBACK (gtk_gst_media_file_media_info_updated_cb), self);
   g_signal_connect (self->play_adapter, "position-updated", G_CALLBACK (gtk_gst_media_file_position_updated_cb), self);
@@ -296,20 +320,27 @@ gtk_gst_media_file_create_play (GtkGstMediaFile *file)
   g_signal_connect (self->play_adapter, "error", G_CALLBACK (gtk_gst_media_file_error_cb), self);
 
   g_object_get (self->play, "pipeline", &self->playbin, NULL);
-  g_signal_connect (self->playbin, "source-setup", G_CALLBACK (gtk_gst_media_file_source_setup_cb), self);
+  g_signal_connect (self->playbin, "source-setup", G_CALLBACK (gtk_gst_media_file_source_setup_cb), NULL);
 
-#if GST_CHECK_VERSION (1,27, 90)
   g_signal_connect (self, "notify::loop", G_CALLBACK (gtk_gst_media_file_update_loop), NULL);
+  g_signal_connect (self, "notify::playing", G_CALLBACK (gtk_gst_media_file_update_loop), NULL);
   gtk_gst_media_file_update_loop (self);
-#endif
+  g_signal_connect (self->playbin, "about-to-finish", G_CALLBACK (gtk_gst_media_file_about_to_finish_cb), NULL);
 }
 
 static void
 gtk_gst_media_file_open (GtkMediaFile *media_file)
 {
   GtkGstMediaFile *self = GTK_GST_MEDIA_FILE (media_file);
+  GObject *source;
 
   gtk_gst_media_file_create_play (self);
+
+  source = G_OBJECT (gtk_media_file_get_input_stream (media_file));
+  if (source == NULL)
+    source = G_OBJECT (gtk_media_file_get_file (media_file));
+  g_object_set_qdata_full (G_OBJECT (self->playbin), source_quark,
+                          g_object_ref (source), g_object_unref);
 
   gst_play_set_uri (self->play, "gtk-media-stream://");
 
@@ -355,17 +386,6 @@ gtk_gst_media_file_seek (GtkMediaStream *stream,
 }
 
 static void
-gtk_gst_media_file_update_audio (GtkMediaStream *stream,
-                                 gboolean        muted,
-                                 double          volume)
-{
-  GtkGstMediaFile *self = GTK_GST_MEDIA_FILE (stream);
-
-  gst_play_set_mute (self->play, muted);
-  gst_play_set_volume (self->play, volume * volume * volume);
-}
-
-static void
 gtk_gst_media_file_realize (GtkMediaStream *stream,
                             GdkSurface     *surface)
 {
@@ -405,6 +425,9 @@ gtk_gst_media_file_class_init (GtkGstMediaFileClass *klass)
   GtkMediaFileClass *file_class = GTK_MEDIA_FILE_CLASS (klass);
   GtkMediaStreamClass *stream_class = GTK_MEDIA_STREAM_CLASS (klass);
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
+
+  loop_quark = g_quark_from_static_string ("gtk-gst-loop");
+  source_quark = g_quark_from_static_string ("gtk-gst-source");
 
   gst_element_register (NULL, "GtkGstBin", GST_RANK_PRIMARY, GTK_TYPE_GST_BIN);
 

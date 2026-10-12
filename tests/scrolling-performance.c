@@ -5,6 +5,7 @@
 
 #include "frame-stats.h"
 
+static gboolean resize_window = FALSE;
 
 /* Stub definition of MyTextView which is used in the
  * widget-factory.ui file. We just need this so the
@@ -82,11 +83,16 @@ scroll_viewport (GtkWidget     *viewport,
 
   set_adjustment_to_fraction (hadjustment, 0.5 + 0.5 * sin (elapsed));
   set_adjustment_to_fraction (vadjustment, 0.5 + 0.5 * cos (elapsed));
+  if (resize_window)
+    gtk_window_set_default_size (GTK_WINDOW (user_data),
+                                 800 + 128 * sin (elapsed * 2),
+                                 600 + 96 * cos (elapsed * 2));
 
   return TRUE;
 }
 
 static GOptionEntry options[] = {
+  { "resize", 0, 0, G_OPTION_ARG_NONE, &resize_window, "Resize the window while scrolling", NULL },
   { NULL }
 };
 
@@ -147,7 +153,7 @@ main (int argc, char **argv)
 
   gtk_widget_add_tick_callback (viewport,
                                 scroll_viewport,
-                                NULL,
+                                window,
                                 NULL);
 
   gtk_window_present (GTK_WINDOW (window));

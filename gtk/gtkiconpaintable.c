@@ -516,11 +516,17 @@ gtk_icon_paintable_init (GtkIconPaintable *icon)
 }
 
 static void
+gtk_icon_paintable_dispose (GObject *object)
+{
+  icon_cache_remove (GTK_ICON_PAINTABLE (object));
+
+  G_OBJECT_CLASS (gtk_icon_paintable_parent_class)->dispose (object);
+}
+
+static void
 gtk_icon_paintable_finalize (GObject *object)
 {
   GtkIconPaintable *icon = (GtkIconPaintable *) object;
-
-  icon_cache_remove (icon);
 
   g_strfreev (icon->key.icon_names);
 
@@ -625,6 +631,7 @@ gtk_icon_paintable_class_init (GtkIconPaintableClass *klass)
 
   gobject_class->get_property = gtk_icon_paintable_get_property;
   gobject_class->set_property = gtk_icon_paintable_set_property;
+  gobject_class->dispose = gtk_icon_paintable_dispose;
   gobject_class->finalize = gtk_icon_paintable_finalize;
 
   /**

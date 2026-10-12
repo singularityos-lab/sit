@@ -237,6 +237,7 @@ char **
 get_color_state_names (void)
 {
   static const char *names[] = {
+    "default",
     "srgb", "srgb-linear", "display-p3", "rec2020",
     "rec2100-pq", "rec2100-linear", "rec2100-hlg",
     "yuv", "bt601", "bt709",
@@ -376,7 +377,7 @@ create_renderer (const char *name, GError **error)
 {
   GskRenderer *renderer;
 
-  if (name == NULL)
+  if (name == NULL || g_str_equal (name, "default"))
     {
       /* awwwwwkward - there should be code to get the
        * default renderer without a surface */

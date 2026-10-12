@@ -983,6 +983,14 @@ foreach backend: enabled_backends
   meson.override_dependency(pkg, libgtk_dep)
 endforeach
 
+pkg_config.generate(
+  filebase: 'sit-1.0',
+  name: 'SIT',
+  description: 'Singularity Interface Toolkit extensions',
+  requires: wayland_enabled ? 'gtk4-wayland' : 'gtk4',
+)
+meson.override_dependency('sit-1.0', libgtk_dep)
+
 foreach a11y_backend: gtk_a11y_backends
   pkg = 'gtk4-@0@'.format(a11y_backend)
   pkg_config.generate(

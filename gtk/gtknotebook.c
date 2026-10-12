@@ -464,6 +464,12 @@ gtk_notebook_page_set_property (GObject      *object,
 
     case CHILD_PROP_MENU:
       g_set_object (&page->menu_label, g_value_get_object (value));
+      /* Menu labels may never be parented. */
+      if (page->menu_label && g_object_is_floating (page->menu_label))
+        {
+          g_object_ref_sink (page->menu_label);
+          g_object_unref (page->menu_label);
+        }
       page->default_menu = page->menu_label == NULL;
       break;
 
@@ -4310,7 +4316,7 @@ gtk_notebook_remove_tab_label (GtkNotebook     *notebook,
           gtk_widget_unparent (page->tab_label);
         }
 
-      page->tab_label = NULL;
+      g_clear_object (&page->tab_label);
     }
 }
 
@@ -6254,10 +6260,7 @@ gtk_notebook_set_show_tabs (GtkNotebook *notebook,
           page = children->data;
           children = children->next;
           if (page->default_tab)
-            {
-              gtk_widget_unparent (page->tab_label);
-              page->tab_label = NULL;
-            }
+            gtk_notebook_remove_tab_label (notebook, page);
           else
             gtk_widget_set_visible (page->tab_label, FALSE);
         }
@@ -6621,6 +6624,7 @@ gtk_notebook_set_tab_label (GtkNotebook *notebook,
     {
       page->default_tab = FALSE;
       page->tab_label = tab_label;
+      g_object_ref_sink (tab_label);
       g_object_set_data (G_OBJECT (page->tab_label), "notebook", notebook);
       gtk_widget_set_parent (page->tab_label, page->tab_widget);
     }
@@ -6636,6 +6640,7 @@ gtk_notebook_set_tab_label (GtkNotebook *notebook,
           g_snprintf (string, sizeof(string), _("Page %u"),
                       g_list_position (notebook->children, list));
           page->tab_label = gtk_label_new (string);
+          g_object_ref_sink (page->tab_label);
           gtk_widget_set_parent (page->tab_label, page->tab_widget);
           g_object_set_data (G_OBJECT (page->tab_label), "notebook", notebook);
         }
@@ -6764,6 +6769,9 @@ gtk_notebook_set_menu_label (GtkNotebook *notebook,
   g_return_if_fail (list != NULL);
 
   page = list->data;
+  if (page->menu_label == menu_label)
+    return;
+
   if (page->menu_label)
     {
       if (notebook->menu)

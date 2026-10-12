@@ -342,6 +342,90 @@ test_editable (void)
   g_object_unref (entry);
 }
 
+
+static void
+test_completion_prefix (gconstpointer data)
+{
+  GtkWidget *entry;
+  GtkEntryCompletion *completion;
+  GtkListStore *store;
+  char *prefix;
+  int mode = GPOINTER_TO_INT (data);
+
+  entry = gtk_entry_new ();
+  g_object_ref_sink (entry);
+  completion = gtk_entry_completion_new ();
+  gtk_entry_completion_set_popup_completion (completion, FALSE);
+  gtk_entry_set_completion (GTK_ENTRY (entry), completion);
+  gtk_editable_set_text (GTK_EDITABLE (entry), "fo");
+  store = gtk_list_store_new (1, G_TYPE_STRING);
+  if (mode != 0)
+    gtk_entry_completion_set_text_column (completion, 0);
+  if (mode >= 2)
+    gtk_entry_completion_set_model (completion, GTK_TREE_MODEL (store));
+  if (mode == 3)
+    gtk_entry_completion_set_model (completion, NULL);
+  if (mode == 4)
+    {
+      gtk_list_store_insert_with_values (store, NULL, -1, 0, "foobar", -1);
+      gtk_list_store_insert_with_values (store, NULL, -1, 0, "foobaz", -1);
+    }
+  if (mode == 5)
+    {
+      gtk_list_store_insert_with_values (store, NULL, -1, 0, "fo\303\251", -1);
+      gtk_list_store_insert_with_values (store, NULL, -1, 0, "fo\303\252", -1);
+    }
+
+  gtk_entry_completion_complete (completion);
+  prefix = gtk_entry_completion_compute_prefix (completion, "fo");
+  g_assert_cmpstr (prefix, ==, mode == 4 ? "fooba" : mode == 5 ? "fo" : NULL);
+  if (prefix != NULL)
+    g_assert_true (g_utf8_validate (prefix, -1, NULL));
+
+  g_free (prefix);
+  g_object_unref (store);
+  g_object_unref (completion);
+  g_object_unref (entry);
+}
+
+static void
+test_completion_detached_idle (gconstpointer data)
+{
+  GtkWidget *entry;
+  GtkEntryCompletion *completion;
+  GtkListStore *store;
+  int pos = 0;
+
+  entry = gtk_entry_new ();
+  g_object_ref_sink (entry);
+  completion = gtk_entry_completion_new ();
+  store = gtk_list_store_new (1, G_TYPE_STRING);
+  gtk_list_store_insert_with_values (store, NULL, -1, 0, "foobar", -1);
+  gtk_entry_completion_set_text_column (completion, 0);
+  gtk_entry_completion_set_popup_completion (completion, FALSE);
+  gtk_entry_completion_set_inline_completion (completion, TRUE);
+  gtk_entry_set_completion (GTK_ENTRY (entry), completion);
+  if (GPOINTER_TO_INT (data))
+    gtk_entry_completion_set_model (completion, GTK_TREE_MODEL (store));
+
+  gtk_editable_insert_text (GTK_EDITABLE (entry), "fo", -1, &pos);
+  gtk_entry_completion_set_model (completion, NULL);
+  while (g_main_context_pending (NULL))
+    g_main_context_iteration (NULL, FALSE);
+  g_assert_cmpstr (gtk_editable_get_text (GTK_EDITABLE (entry)), ==, "fo");
+
+  gtk_entry_completion_insert_prefix (completion);
+  g_assert_cmpstr (gtk_editable_get_text (GTK_EDITABLE (entry)), ==, "fo");
+  gtk_entry_completion_set_model (completion, GTK_TREE_MODEL (store));
+  gtk_entry_completion_complete (completion);
+  gtk_entry_completion_insert_prefix (completion);
+  g_assert_cmpstr (gtk_editable_get_text (GTK_EDITABLE (entry)), ==, "foobar");
+
+  g_object_unref (store);
+  g_object_unref (completion);
+  g_object_unref (entry);
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -351,6 +435,15 @@ main (int   argc,
   g_test_add_func ("/entry/delete", test_delete);
   g_test_add_func ("/entry/insert", test_insert);
   g_test_add_func ("/entry/editable", test_editable);
+
+  g_test_add_data_func ("/entry/completion/default-column", GINT_TO_POINTER (0), test_completion_prefix);
+  g_test_add_data_func ("/entry/completion/missing-model", GINT_TO_POINTER (1), test_completion_prefix);
+  g_test_add_data_func ("/entry/completion/empty-model", GINT_TO_POINTER (2), test_completion_prefix);
+  g_test_add_data_func ("/entry/completion/detached-model", GINT_TO_POINTER (3), test_completion_prefix);
+  g_test_add_data_func ("/entry/completion/prefix", GINT_TO_POINTER (4), test_completion_prefix);
+  g_test_add_data_func ("/entry/completion/utf8-prefix", GINT_TO_POINTER (5), test_completion_prefix);
+  g_test_add_data_func ("/entry/completion/missing-idle", GINT_TO_POINTER (0), test_completion_detached_idle);
+  g_test_add_data_func ("/entry/completion/detached-idle", GINT_TO_POINTER (1), test_completion_detached_idle);
 
   return g_test_run();
 }

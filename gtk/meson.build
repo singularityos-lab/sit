@@ -644,7 +644,11 @@ install_headers(gtk_public_headers, subdir: 'gtk-4.0/gtk/')
 install_headers(gtk_deprecated_headers, subdir: 'gtk-4.0/gtk/deprecated')
 install_headers(gtk_print_headers, subdir: 'gtk-4.0/gtk/print')
 
-gtk_sources = gtk_public_sources + gtk_private_sources
+sit_gtk_public_headers = files('sit.h')
+sit_gtk_sources = files('sitwidget.c')
+install_headers(sit_gtk_public_headers, subdir: 'gtk-4.0/gtk/')
+
+gtk_sources = gtk_public_sources + gtk_private_sources + sit_gtk_sources
 
 if os_unix and tracker3_dep.found()
   gtk_sources += 'gtksearchenginetracker3.c'
@@ -1249,6 +1253,35 @@ if build_gir
     fatal_warnings: false,
   )
   gtk_dep_sources += gtk_gir
+
+  sit_sources = sit_gtk_public_headers + sit_gtk_sources
+  if wayland_enabled
+    sit_sources += sit_wayland_public_headers + sit_wayland_sources
+  endif
+
+  sit_gir = gnome.generate_gir(libgtk,
+    sources: sit_sources,
+    namespace: 'Sit',
+    nsversion: '1.0',
+    identifier_prefix: 'Sit',
+    symbol_prefix: 'sit',
+    export_packages: 'sit-1.0',
+    includes: [ gtk_gir[0], ],
+    install: true,
+    dependencies: [gtk_deps, libgsk_dep],
+    header: 'gtk/sit.h',
+    extra_args: gir_args,
+    fatal_warnings: get_option('werror'),
+  )
+  gtk_dep_sources += sit_gir
+
+  if find_program('vapigen', required: false).found()
+    gnome.generate_vapi('sit-1.0',
+      sources: sit_gir[0],
+      packages: ['gtk4'],
+      install: true,
+    )
+  endif
 endif
 
 libgtk_dep = declare_dependency(sources: gtk_dep_sources,

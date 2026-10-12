@@ -121,6 +121,8 @@ struct _GdkWaylandTabletPadData
   GList *strips;
   GList *dials;
   GList *mode_groups;
+
+  GdkSurface *focus;
 };
 
 struct _GdkWaylandTabletToolData

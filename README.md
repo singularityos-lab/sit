@@ -1,7 +1,15 @@
-GTK — The GTK toolkit
-=====================
+SIT
+===
 
-[![Build status](https://gitlab.gnome.org/GNOME/gtk/badges/main/pipeline.svg)](https://gitlab.gnome.org/GNOME/gtk/-/commits/main)
+[![Upstream GTK build status](https://gitlab.gnome.org/GNOME/gtk/badges/main/pipeline.svg)](https://gitlab.gnome.org/GNOME/gtk/-/commits/main)
+
+Extensions
+----------
+
+SIT is GTK 4.22.4 with the Singularity Interface Toolkit extensions, declared
+in `gtk/sit.h` and published as `sit-1.0`. It keeps the GTK 4 ABI, so it
+replaces `libgtk-4.so.1` without rebuilding applications.
+The upstream GTK information follows.
 
 General information
 -------------------

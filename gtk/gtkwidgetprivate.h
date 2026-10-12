@@ -41,6 +41,20 @@
 
 G_BEGIN_DECLS
 
+GskRenderNode *_gtk_widget_get_visual_node (GtkWidget *widget);
+
+
+gboolean _gtk_widget_set_visual_opacity (GtkWidget *widget,
+                                        double     opacity);
+gboolean _gtk_widget_set_visual_clip    (GtkWidget            *widget,
+                                        const GskRoundedRect *clip);
+
+
+gboolean      _gtk_widget_set_visual_transform (GtkWidget    *widget,
+                                                GskTransform *transform);
+GskTransform *_gtk_widget_get_visual_transform (GtkWidget    *widget);
+
+
 typedef gboolean (*GtkSurfaceTransformChangedCallback) (GtkWidget               *widget,
                                                         const graphene_matrix_t *surface_transform,
                                                         gpointer                 user_data);
@@ -483,5 +497,8 @@ _gtk_widget_is_sensitive (GtkWidget *widget)
 
 void gtk_widget_set_accessible_role (GtkWidget        *self,
                                      GtkAccessibleRole role);
+
+gboolean _gtk_widget_get_visual_clip (GtkWidget      *widget,
+                                      GskRoundedRect *clip);
 
 G_END_DECLS

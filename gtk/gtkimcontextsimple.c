@@ -174,6 +174,7 @@ gtk_im_context_simple_class_init (GtkIMContextSimpleClass *class)
 
   im_context_class->filter_keypress = gtk_im_context_simple_filter_keypress;
   im_context_class->reset = gtk_im_context_simple_reset;
+  im_context_class->focus_out = gtk_im_context_simple_reset;
   im_context_class->get_preedit_string = gtk_im_context_simple_get_preedit_string;
   gobject_class->finalize = gtk_im_context_simple_finalize;
 

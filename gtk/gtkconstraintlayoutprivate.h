@@ -32,6 +32,12 @@ gtk_constraint_layout_get_attribute (GtkConstraintLayout    *layout,
                                      GtkConstraintAttribute  attr,
                                      const char             *prefix,
                                      GtkWidget              *widget,
-                                     GHashTable             *bound_attributes);
+                                     GHashTable             *bound_attributes,
+                                     GPtrArray              *attribute_constraints);
+
+void
+gtk_constraint_layout_clear_attributes (GtkConstraintLayout *layout,
+                                        GHashTable          *bound_attributes,
+                                        GPtrArray           *attribute_constraints);
 
 G_END_DECLS

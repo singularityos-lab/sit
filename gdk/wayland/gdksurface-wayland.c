@@ -566,6 +566,7 @@ gdk_wayland_surface_finalize (GObject *object)
 
   g_clear_pointer (&impl->opaque_region, cairo_region_destroy);
   g_clear_pointer (&impl->input_region, cairo_region_destroy);
+  sit_wayland_surface_destroy_background_effect (impl);
 
   G_OBJECT_CLASS (gdk_wayland_surface_parent_class)->finalize (object);
 }
@@ -751,6 +752,7 @@ gdk_wayland_surface_sync (GdkSurface *surface)
   gdk_wayland_surface_sync_buffer_scale (surface);
   gdk_wayland_surface_sync_color_state (surface);
   gdk_wayland_surface_sync_viewport (surface);
+  sit_wayland_surface_sync_background_effect (GDK_WAYLAND_SURFACE (surface));
 }
 
 static gboolean
@@ -758,7 +760,8 @@ gdk_wayland_surface_needs_commit (GdkSurface *surface)
 {
   GdkWaylandSurface *self = GDK_WAYLAND_SURFACE (surface);
 
-  return self->has_pending_subsurface_commits ||
+  return sit_wayland_surface_background_effect_needs_commit (self) ||
+         self->has_pending_subsurface_commits ||
          self->opaque_region_dirty ||
          self->input_region_dirty ||
          self->buffer_scale_dirty ||
@@ -957,6 +960,7 @@ gdk_wayland_surface_constructed (GObject *object)
 static void
 gdk_wayland_surface_destroy_wl_surface (GdkWaylandSurface *self)
 {
+  sit_wayland_surface_clear_background_effect (self);
   g_clear_pointer (&self->display_server.viewport, wp_viewport_destroy);
   g_clear_pointer (&self->display_server.fractional_scale, wp_fractional_scale_v1_destroy);
   g_clear_pointer (&self->display_server.color, gdk_wayland_color_surface_free);

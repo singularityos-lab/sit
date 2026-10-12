@@ -106,6 +106,10 @@ gtk_constraint_solver_note_removed_variable (GtkConstraintSolver *self,
                                              GtkConstraintVariable *subject);
 
 void
+gtk_constraint_solver_remove_unused_variable (GtkConstraintSolver   *solver,
+                                              GtkConstraintVariable *variable);
+
+void
 gtk_constraint_solver_clear (GtkConstraintSolver *solver);
 
 char *

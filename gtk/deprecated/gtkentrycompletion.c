@@ -1282,7 +1282,7 @@ gtk_entry_completion_compute_prefix (GtkEntryCompletion *completion,
   char *prefix = NULL;
   gboolean valid;
 
-  if (completion->text_column < 0)
+  if (completion->text_column < 0 || completion->filter_model == NULL)
     return NULL;
 
   valid = gtk_tree_model_get_iter_first (GTK_TREE_MODEL (completion->filter_model),

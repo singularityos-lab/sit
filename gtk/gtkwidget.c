@@ -68,6 +68,7 @@
 #include "gtkwidgetpaintableprivate.h"
 #include "gtkwindowgroup.h"
 #include "gtkwindowprivate.h"
+#include "gsk/gskroundedrectprivate.h"
 #include "gtktestatcontextprivate.h"
 
 #include "inspector/window.h"
@@ -2916,6 +2917,8 @@ gtk_widget_hide (GtkWidget *widget)
     }
 }
 
+static void clear_sit_allocation (GtkWidget *widget);
+
 static void
 gtk_widget_real_hide (GtkWidget *widget)
 {
@@ -2933,6 +2936,7 @@ gtk_widget_real_hide (GtkWidget *widget)
   priv->allocated_height = 0;
   priv->allocated_baseline = 0;
   g_clear_pointer (&priv->transform, gsk_transform_unref);
+  clear_sit_allocation (widget);
   priv->width = 0;
   priv->height = 0;
   priv->baseline = 0;
@@ -4124,6 +4128,218 @@ gtk_widget_ensure_allocate_on_children (GtkWidget *widget)
     }
 }
 
+typedef struct
+{
+  GskTransform *allocation;
+  GskTransform *visual;
+  GskRoundedRect clip;
+  gboolean has_clip;
+  gboolean retain_opacity;
+} SitWidgetTransform;
+
+static GQuark quark_sit_transform;
+
+static SitWidgetTransform *
+get_sit_transform (GtkWidget *widget)
+{
+  return quark_sit_transform ? g_object_get_qdata (G_OBJECT (widget), quark_sit_transform) : NULL;
+}
+
+static void
+free_sit_transform (gpointer data)
+{
+  SitWidgetTransform *state = data;
+
+  gsk_transform_unref (state->allocation);
+  gsk_transform_unref (state->visual);
+  g_free (state);
+}
+
+static SitWidgetTransform *
+ensure_sit_transform (GtkWidget *widget)
+{
+  GtkWidgetPrivate *priv = gtk_widget_get_instance_private (widget);
+  SitWidgetTransform *state = get_sit_transform (widget);
+
+  if (state == NULL)
+    {
+      state = g_new0 (SitWidgetTransform, 1);
+      state->allocation = gsk_transform_ref (priv->transform);
+      if (quark_sit_transform == 0)
+        quark_sit_transform = g_quark_from_static_string ("sit-widget-transform");
+      g_object_set_qdata_full (G_OBJECT (widget), quark_sit_transform, state, free_sit_transform);
+    }
+
+  return state;
+}
+
+static void
+clear_sit_allocation (GtkWidget *widget)
+{
+  SitWidgetTransform *state = get_sit_transform (widget);
+
+  if (state != NULL)
+    g_clear_pointer (&state->allocation, gsk_transform_unref);
+}
+
+gboolean
+_gtk_widget_set_visual_transform (GtkWidget    *widget,
+                                  GskTransform *transform)
+{
+  GtkWidgetPrivate *priv;
+  SitWidgetTransform *state;
+
+  g_return_val_if_fail (GTK_IS_WIDGET (widget), FALSE);
+
+  if (GTK_IS_NATIVE (widget))
+    return FALSE;
+
+  if (transform != NULL)
+    {
+      graphene_matrix_t matrix;
+      float values[16];
+
+      gsk_transform_to_matrix (transform, &matrix);
+      graphene_matrix_to_float (&matrix, values);
+      for (unsigned i = 0; i < G_N_ELEMENTS (values); i++)
+        if (!isfinite (values[i]))
+          return FALSE;
+    }
+
+  priv = gtk_widget_get_instance_private (widget);
+  state = get_sit_transform (widget);
+  if (state == NULL)
+    {
+      if (transform == NULL)
+        return TRUE;
+
+      state = ensure_sit_transform (widget);
+    }
+  else if (gsk_transform_equal (state->visual, transform))
+    return TRUE;
+
+  gsk_transform_unref (state->visual);
+  state->visual = gsk_transform_ref (transform);
+  gsk_transform_unref (priv->transform);
+  priv->transform = gsk_transform_transform (gsk_transform_ref (state->allocation), transform);
+
+  if (priv->surface_transform_data)
+    sync_widget_surface_transform (widget);
+  gtk_accessible_bounds_changed (GTK_ACCESSIBLE (widget));
+  GtkRoot *root = gtk_widget_get_root (widget);
+  if (GTK_IS_WINDOW (root))
+    _gtk_window_invalidate_border_region (GTK_WINDOW (root), widget);
+  gtk_widget_update_paintables (widget);
+  update_cursor_on_state_change (widget);
+  if (priv->parent != NULL)
+    gtk_widget_queue_draw (priv->parent);
+
+  return TRUE;
+}
+
+GskTransform *
+_gtk_widget_get_visual_transform (GtkWidget *widget)
+{
+  SitWidgetTransform *state;
+
+  g_return_val_if_fail (GTK_IS_WIDGET (widget), NULL);
+
+  state = get_sit_transform (widget);
+  return state ? state->visual : NULL;
+}
+
+gboolean
+_gtk_widget_set_visual_opacity (GtkWidget *widget,
+                                double     opacity)
+{
+  SitWidgetTransform *state;
+
+  g_return_val_if_fail (GTK_IS_WIDGET (widget), FALSE);
+
+  if (GTK_IS_NATIVE (widget) || !isfinite (opacity))
+    return FALSE;
+
+  state = ensure_sit_transform (widget);
+  if (!state->retain_opacity)
+    {
+      state->retain_opacity = TRUE;
+      gtk_widget_queue_draw (widget);
+    }
+  gtk_widget_set_opacity (widget, opacity);
+  return TRUE;
+}
+
+gboolean
+_gtk_widget_set_visual_clip (GtkWidget            *widget,
+                             const GskRoundedRect *clip)
+{
+  GtkWidgetPrivate *priv;
+  SitWidgetTransform *state;
+  GskRoundedRect normalized;
+
+  g_return_val_if_fail (GTK_IS_WIDGET (widget), FALSE);
+
+  if (GTK_IS_NATIVE (widget))
+    return FALSE;
+  if (clip != NULL)
+    {
+      if (!isfinite (clip->bounds.origin.x) || !isfinite (clip->bounds.origin.y) ||
+          !isfinite (clip->bounds.size.width) || !isfinite (clip->bounds.size.height) ||
+          clip->bounds.size.width < 0 || clip->bounds.size.height < 0)
+        return FALSE;
+      for (unsigned i = 0; i < 4; i++)
+        if (!isfinite (clip->corner[i].width) || !isfinite (clip->corner[i].height) ||
+            clip->corner[i].width < 0 || clip->corner[i].height < 0)
+          return FALSE;
+      normalized = *clip;
+      gsk_rounded_rect_normalize (&normalized);
+    }
+
+  state = get_sit_transform (widget);
+  if (clip == NULL && (state == NULL || !state->has_clip))
+    return TRUE;
+  if (state != NULL && state->has_clip && clip != NULL &&
+      gsk_rounded_rect_equal (&state->clip, &normalized))
+    return TRUE;
+  state = ensure_sit_transform (widget);
+  state->has_clip = clip != NULL;
+  if (clip != NULL)
+    state->clip = normalized;
+  GtkRoot *root = gtk_widget_get_root (widget);
+  if (GTK_IS_WINDOW (root))
+    _gtk_window_invalidate_border_region (GTK_WINDOW (root), widget);
+  priv = gtk_widget_get_instance_private (widget);
+  gtk_widget_update_paintables (widget);
+  update_cursor_on_state_change (widget);
+  if (priv->parent != NULL)
+    gtk_widget_queue_draw (priv->parent);
+  return TRUE;
+}
+
+gboolean
+_gtk_widget_get_visual_clip (GtkWidget      *widget,
+                             GskRoundedRect *clip)
+{
+  SitWidgetTransform *state = get_sit_transform (widget);
+
+  if (state == NULL || !state->has_clip)
+    return FALSE;
+
+  *clip = state->clip;
+  return TRUE;
+}
+
+static gboolean
+sit_clip_contains (GtkWidget *widget,
+                   double     x,
+                   double     y)
+{
+  SitWidgetTransform *state = get_sit_transform (widget);
+
+  return state == NULL || !state->has_clip ||
+         gsk_rounded_rect_contains_point (&state->clip, &GRAPHENE_POINT_INIT (x, y));
+}
+
 /**
  * gtk_widget_allocate:
  * @widget: a widget
@@ -4302,6 +4518,14 @@ gtk_widget_allocate (GtkWidget    *widget,
     baseline -= margin.top + border.top + padding.top;
   if (adjusted.x || adjusted.y)
     transform = gsk_transform_translate (transform, &GRAPHENE_POINT_INIT (adjusted.x, adjusted.y));
+
+  SitWidgetTransform *sit = get_sit_transform (widget);
+  if (sit != NULL)
+    {
+      gsk_transform_unref (sit->allocation);
+      sit->allocation = gsk_transform_ref (transform);
+      transform = gsk_transform_transform (transform, sit->visual);
+    }
 
   gsk_transform_unref (priv->transform);
   priv->transform = transform;
@@ -5985,6 +6209,7 @@ _gtk_widget_set_visible_flag (GtkWidget *widget,
       priv->allocated_height = 0;
       priv->allocated_baseline = 0;
       g_clear_pointer (&priv->transform, gsk_transform_unref);
+      clear_sit_allocation (widget);
       priv->width = 0;
       priv->height = 0;
       gtk_widget_update_paintables (widget);
@@ -10409,7 +10634,8 @@ gtk_widget_contains (GtkWidget  *widget,
   if (!_gtk_widget_get_mapped (widget))
     return FALSE;
 
-  return GTK_WIDGET_GET_CLASS (widget)->contains (widget, x, y);
+  return sit_clip_contains (widget, x, y) &&
+         GTK_WIDGET_GET_CLASS (widget)->contains (widget, x, y);
 }
 
 /* do the checks for gtk_widget_pick that do not depend on position */
@@ -10439,6 +10665,9 @@ gtk_widget_do_pick (GtkWidget    *widget,
 {
   GtkWidgetPrivate *priv = gtk_widget_get_instance_private (widget);
   GtkWidget *child;
+
+  if (!sit_clip_contains (widget, x, y))
+    return NULL;
 
   if (priv->overflow == GTK_OVERFLOW_HIDDEN)
     {
@@ -10832,7 +11061,14 @@ gtk_widget_set_opacity (GtkWidget *widget,
 
   priv->user_alpha = alpha;
 
-  gtk_widget_queue_draw (widget);
+  SitWidgetTransform *sit = get_sit_transform (widget);
+  if (sit != NULL && sit->retain_opacity && priv->parent != NULL)
+    {
+      gtk_widget_update_paintables (widget);
+      gtk_widget_queue_draw (priv->parent);
+    }
+  else
+    gtk_widget_queue_draw (widget);
 
   g_object_notify_by_pspec (G_OBJECT (widget), widget_props[PROP_OPACITY]);
 }
@@ -12069,12 +12305,29 @@ gtk_widget_create_render_node (GtkWidget   *widget,
   style = gtk_css_node_get_style (priv->cssnode);
 
   css_opacity = gtk_css_number_value_get (style->other->opacity, 1);
-  opacity = CLAMP (css_opacity, 0.0, 1.0) * priv->user_alpha / 255.0;
+  SitWidgetTransform *sit = get_sit_transform (widget);
+  opacity = CLAMP (css_opacity, 0.0, 1.0);
+  if (sit == NULL || !sit->retain_opacity)
+    opacity *= priv->user_alpha / 255.0;
 
   if (opacity <= 0.0)
     return NULL;
 
   gtk_css_boxes_init (&boxes, widget);
+
+  if (GTK_IS_WINDOW (widget))
+    {
+      GskRoundedRect border;
+
+      if (_gtk_window_update_border_geometry (GTK_WINDOW (widget), &border))
+        {
+          gtk_css_boxes_init_border_box (&boxes, style,
+                                        border.bounds.origin.x, border.bounds.origin.y,
+                                        border.bounds.size.width, border.bounds.size.height);
+          boxes.box[GTK_CSS_AREA_BORDER_BOX] = border;
+          boxes.has_box[GTK_CSS_AREA_BORDER_BOX] = TRUE;
+        }
+    }
 
   gtk_snapshot_push_collect (snapshot);
   gtk_snapshot_push_debug (snapshot,
@@ -12189,6 +12442,61 @@ gtk_widget_do_snapshot (GtkWidget   *widget,
   gtk_widget_update_paintables (widget);
 }
 
+static GskRenderNode *
+wrap_sit_node (GtkWidget     *widget,
+               GskRenderNode *node,
+               gboolean       visual_transform)
+{
+  GtkWidgetPrivate *priv = gtk_widget_get_instance_private (widget);
+  SitWidgetTransform *state = get_sit_transform (widget);
+  GskRenderNode *result = gsk_render_node_ref (node);
+  GskRenderNode *next;
+
+  if (state == NULL)
+    return result;
+  if (state->has_clip)
+    {
+      next = gsk_rounded_clip_node_new (result, &state->clip);
+      gsk_render_node_unref (result);
+      result = next;
+    }
+  if (state->retain_opacity && priv->user_alpha != 255)
+    {
+      next = gsk_opacity_node_new (result, priv->user_alpha / 255.0);
+      gsk_render_node_unref (result);
+      result = next;
+    }
+  if (visual_transform && state->visual != NULL)
+    {
+      next = gsk_transform_node_new (result, state->visual);
+      gsk_render_node_unref (result);
+      result = next;
+    }
+  return result;
+}
+
+GskRenderNode *
+_gtk_widget_get_visual_node (GtkWidget *widget)
+{
+  GtkWidgetPrivate *priv = gtk_widget_get_instance_private (widget);
+
+  if (priv->render_node == NULL)
+    return NULL;
+  return wrap_sit_node (widget, priv->render_node, TRUE);
+}
+
+static void
+append_sit_node (GtkWidget     *widget,
+                 GtkSnapshot   *snapshot,
+                 GskRenderNode *node,
+                 gboolean       visual_transform)
+{
+  GskRenderNode *visual = wrap_sit_node (widget, node, visual_transform);
+
+  gtk_snapshot_append_node (snapshot, visual);
+  gsk_render_node_unref (visual);
+}
+
 void
 gtk_widget_snapshot (GtkWidget   *widget,
                      GtkSnapshot *snapshot)
@@ -12201,7 +12509,7 @@ gtk_widget_snapshot (GtkWidget   *widget,
   gtk_widget_do_snapshot (widget, snapshot);
 
   if (priv->render_node)
-    gtk_snapshot_append_node (snapshot, priv->render_node);
+    append_sit_node (widget, snapshot, priv->render_node, TRUE);
 }
 
 void
@@ -12619,7 +12927,21 @@ gtk_widget_snapshot_child (GtkWidget   *widget,
   if (!priv->render_node)
     return;
 
-  if (priv->transform)
+  if (get_sit_transform (child) != NULL)
+    {
+      GskRenderNode *node = wrap_sit_node (child, priv->render_node, FALSE);
+
+      if (priv->transform != NULL)
+        {
+          GskRenderNode *transformed = gsk_transform_node_new (node, priv->transform);
+
+          gsk_render_node_unref (node);
+          node = transformed;
+        }
+      gtk_snapshot_append_node (snapshot, node);
+      gsk_render_node_unref (node);
+    }
+  else if (priv->transform)
     {
       GskRenderNode *transform_node = gsk_transform_node_new (priv->render_node,
                                                               priv->transform);

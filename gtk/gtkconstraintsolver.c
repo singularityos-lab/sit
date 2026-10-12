@@ -596,6 +596,22 @@ out:
   gtk_constraint_variable_unref (variable);
 }
 
+void
+gtk_constraint_solver_remove_unused_variable (GtkConstraintSolver   *self,
+                                              GtkConstraintVariable *variable)
+{
+  GtkConstraintVariableSet *set;
+
+  if (g_hash_table_contains (self->rows, variable))
+    return;
+
+  set = g_hash_table_lookup (self->columns, variable);
+  if (set != NULL && !gtk_constraint_variable_set_is_empty (set))
+    return;
+
+  gtk_constraint_solver_remove_column (self, variable);
+}
+
 static GtkConstraintExpression *
 gtk_constraint_solver_remove_row (GtkConstraintSolver *self,
                                   GtkConstraintVariable *variable,
@@ -898,7 +914,6 @@ gtk_constraint_solver_new_expression (GtkConstraintSolver *self,
 
           eminus = gtk_constraint_variable_new_slack ("em");
           gtk_constraint_expression_set_variable (expr, eminus, 1.0);
-          gtk_constraint_variable_unref (eminus);
 
           z_row = g_hash_table_lookup (self->rows, self->objective);
           gtk_constraint_expression_set_variable (z_row, eminus, constraint->strength);
@@ -1398,6 +1413,8 @@ gtk_constraint_solver_thaw (GtkConstraintSolver *solver)
   if (solver->freeze_count == 0)
     {
       solver->auto_solve = TRUE;
+      if (solver->needs_solving)
+        gtk_constraint_solver_optimize (solver, solver->objective);
       gtk_constraint_solver_resolve (solver);
     }
 }
@@ -1762,7 +1779,7 @@ gtk_constraint_solver_remove_constraint (GtkConstraintSolver *self,
             {
               gtk_constraint_expression_add_variable (z_row,
                                                       v,
-                                                      constraint->strength,
+                                                      -constraint->strength,
                                                       self->objective,
                                                       self);
             }
@@ -1770,7 +1787,7 @@ gtk_constraint_solver_remove_constraint (GtkConstraintSolver *self,
             {
               gtk_constraint_expression_add_expression (z_row,
                                                         e,
-                                                        constraint->strength,
+                                                        -constraint->strength,
                                                         self->objective,
                                                         self);
             }
@@ -1900,7 +1917,7 @@ no_columns:
                 found = TRUE;
 
               if (gtk_constraint_variable_set_remove (error_vars, pair->second))
-                found = FALSE;
+                found = TRUE;
 
               if (!found)
                 g_ptr_array_add (remaining, gtk_constraint_variable_pair_new (pair->first, pair->second));

@@ -3989,6 +3989,7 @@ gtk_text_iter_set_visible_line_index (GtkTextIter *iter,
                                       int          byte_on_line)
 {
   GtkTextRealIter *real;
+  GtkTextLine *line;
   int offset = 0;
   GtkTextIter pos;
   GtkTextLineSegment *seg;
@@ -4008,10 +4009,15 @@ gtk_text_iter_set_visible_line_index (GtkTextIter *iter,
 
   check_invariants (&pos);
 
+  line = real->line;
   seg = _gtk_text_iter_get_indexable_segment (&pos);
 
   while (seg != NULL && byte_on_line > 0)
     {
+      /* Byte offsets are local to the original line. */
+      if (real->line != line)
+        break;
+
       if (!_gtk_text_btree_char_is_invisible (&pos))
         {
           if (byte_on_line < seg->byte_count)

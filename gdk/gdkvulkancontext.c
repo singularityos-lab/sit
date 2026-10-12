@@ -95,6 +95,7 @@ struct _GdkVulkanContextPrivate {
   GdkMemoryDepth current_depth;
 
   VkSwapchainKHR swapchain;
+  VkImageUsageFlags image_usage;
 
   guint n_images;
   VkImage *images;
@@ -504,6 +505,14 @@ gdk_vulkan_context_check_swapchain (GdkVulkanContext  *context,
       size.height = CLAMP (size.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
     }
 
+  VkImageUsageFlags image_usage = priv->image_usage ? priv->image_usage : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  if ((capabilities.supportedUsageFlags & image_usage) != image_usage)
+    {
+      g_set_error_literal (error, GDK_VULKAN_ERROR, GDK_VULKAN_ERROR_UNSUPPORTED,
+                           "The Vulkan surface does not support the requested image usage");
+      return FALSE;
+    }
+
   res = GDK_VK_CHECK (vkCreateSwapchainKHR, device,
                                             &(VkSwapchainCreateInfoKHR) {
                                                 .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -517,7 +526,7 @@ gdk_vulkan_context_check_swapchain (GdkVulkanContext  *context,
                                                 .imageColorSpace = priv->formats[priv->current_depth].vk_format.colorSpace,
                                                 .imageExtent = size,
                                                 .imageArrayLayers = 1,
-                                                .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                                .imageUsage = image_usage,
                                                 .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
                                                 .queueFamilyIndexCount = 1,
                                                 .pQueueFamilyIndices = (uint32_t[1]) {
@@ -927,6 +936,23 @@ gdk_vulkan_context_begin_frame (GdkDrawContext  *draw_context,
   *out_depth = priv->current_depth;
 }
 
+static const char abort_frame_marker;
+
+void
+gdk_vulkan_context_abort_frame (GdkVulkanContext *context)
+{
+  gdk_draw_context_end_frame_full (GDK_DRAW_CONTEXT (context), (gpointer) &abort_frame_marker);
+}
+
+void
+gdk_vulkan_context_set_image_usage (GdkVulkanContext *context,
+                                   VkImageUsageFlags usage)
+{
+  GdkVulkanContextPrivate *priv = gdk_vulkan_context_get_instance_private (context);
+  g_return_if_fail (priv->swapchain == VK_NULL_HANDLE);
+  priv->image_usage = usage;
+}
+
 static void
 gdk_vulkan_context_end_frame (GdkDrawContext *draw_context,
                               gpointer        context_data,
@@ -940,9 +966,17 @@ gdk_vulkan_context_end_frame (GdkDrawContext *draw_context,
   VkSwapchainPresentFenceInfoEXT fence_info;
   void *pNext = NULL;
 
-  g_assert (context_data == NULL);
-
   present = &priv->presents[priv->latest_present];
+
+  if (context_data == &abort_frame_marker)
+    {
+      /* No present can wait on an unsubmitted signal after a renderer failure. */
+      vkDeviceWaitIdle (gdk_vulkan_context_get_device (context));
+      gdk_vulkan_context_unref_swapchain (context, present->vk_swapchain);
+      present->vk_swapchain = VK_NULL_HANDLE;
+      return;
+    }
+  g_assert (context_data == NULL);
 
   if (present->vk_fence)
     {

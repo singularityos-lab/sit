@@ -30,6 +30,7 @@
 #include "gdkframeclockprivate.h"
 #include "gdkprivate.h"
 #include "gdkprofilerprivate.h"
+#include "sitframestatsprivate.h"
 
 #ifdef G_OS_WIN32
 #include <windows.h>
@@ -430,6 +431,8 @@ gdk_frame_clock_paint_idle (void *data)
   gboolean skip_to_resume_events;
   GdkFrameTimings *timings = NULL;
   gint64 before G_GNUC_UNUSED;
+  gboolean sit_stats = sit_frame_stats_enabled ();
+  gint64 sit_frame_start = 0, sit_layout_start = 0, sit_paint_start = 0;
 
   before = GDK_PROFILER_CURRENT_TIME;
 
@@ -564,6 +567,8 @@ gdk_frame_clock_paint_idle (void *data)
                * in them.
                */
               priv->requested &= ~GDK_FRAME_CLOCK_PHASE_BEFORE_PAINT;
+              if (sit_stats)
+                sit_frame_start = g_get_monotonic_time ();
               _gdk_frame_clock_emit_before_paint (clock);
               priv->phase = GDK_FRAME_CLOCK_PHASE_UPDATE;
             }
@@ -596,6 +601,8 @@ gdk_frame_clock_paint_idle (void *data)
                 }
 
               priv->phase = GDK_FRAME_CLOCK_PHASE_LAYOUT;
+              if (sit_stats)
+                sit_layout_start = g_get_monotonic_time ();
 	      /* We loop in the layout phase, because we don't want to progress
 	       * into the paint phase with invalid size allocations. This may
 	       * happen in some situation like races between user window
@@ -628,6 +635,8 @@ gdk_frame_clock_paint_idle (void *data)
                 }
 
               priv->phase = GDK_FRAME_CLOCK_PHASE_PAINT;
+              if (sit_stats)
+                sit_paint_start = g_get_monotonic_time ();
               if (priv->requested & GDK_FRAME_CLOCK_PHASE_PAINT)
                 {
                   priv->requested &= ~GDK_FRAME_CLOCK_PHASE_PAINT;
@@ -644,6 +653,8 @@ gdk_frame_clock_paint_idle (void *data)
               /* the ::after-paint phase doesn't get repeated on freeze/thaw,
                */
               priv->phase = GDK_FRAME_CLOCK_PHASE_NONE;
+              if (sit_stats && sit_frame_start)
+                sit_frame_stats_record (sit_frame_start, sit_layout_start, sit_paint_start, g_get_monotonic_time ());
             }
           if (GDK_DEBUG_CHECK (FRAMES))
             {

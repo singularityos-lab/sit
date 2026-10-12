@@ -308,19 +308,19 @@ process_on_globals_closures (GdkWaylandDisplay *display_wayland)
   iter = display_wayland->on_has_globals_closures;
   while (iter != NULL)
     {
-      GList *next = iter->next;
       OnHasGlobalsClosure *closure = iter->data;
 
       if (has_required_globals (display_wayland,
                                 closure->required_globals))
         {
-          closure->handler (display_wayland, closure);
-          g_free (closure);
           display_wayland->on_has_globals_closures =
             g_list_delete_link (display_wayland->on_has_globals_closures, iter);
+          closure->handler (display_wayland, closure);
+          g_free (closure);
+          iter = display_wayland->on_has_globals_closures;
         }
-
-      iter = next;
+      else
+        iter = iter->next;
     }
 }
 
@@ -747,8 +747,19 @@ gdk_registry_handle_global (void               *data,
                           &xdg_toplevel_icon_manager_v1_interface, XDG_TOPLEVEL_ICON_VERSION);
     }
 
+  else if (match_global (display_wayland, interface, version, zsingularity_blur_manager_v1_interface.name, 0))
+    {
+      display_wayland->background_effect_manager =
+        wl_registry_bind (registry, id, &zsingularity_blur_manager_v1_interface,
+                          MIN (version, 4));
+      display_wayland->background_effect_manager_id = id;
+    }
+
   g_hash_table_insert (display_wayland->known_globals,
                        GUINT_TO_POINTER (id), g_strdup (interface));
+
+  if (display_wayland->initial_globals_done)
+    process_on_globals_closures (display_wayland);
 }
 
 static void
@@ -757,8 +768,32 @@ gdk_registry_handle_global_remove (void               *data,
                                    uint32_t            id)
 {
   GdkWaylandDisplay *display_wayland = data;
+  GList *iter;
 
   GDK_DEBUG (MISC, "remove global %u", id);
+
+  iter = display_wayland->on_has_globals_closures;
+  while (iter != NULL)
+    {
+      GList *next = iter->next;
+      OnHasGlobalsClosure *closure = iter->data;
+
+      if (closure->handler == seat_added_closure_run &&
+          ((SeatAddedClosure *) closure)->id == id)
+        {
+          display_wayland->on_has_globals_closures =
+            g_list_delete_link (display_wayland->on_has_globals_closures, iter);
+          g_free (closure);
+        }
+
+      iter = next;
+    }
+
+  if (id == display_wayland->background_effect_manager_id)
+    {
+      g_clear_pointer (&display_wayland->background_effect_manager, zsingularity_blur_manager_v1_destroy);
+      display_wayland->background_effect_manager_id = 0;
+    }
 
   gdk_wayland_display_remove_seat (display_wayland, id);
   gdk_wayland_display_remove_output (display_wayland, id);
@@ -826,6 +861,7 @@ _gdk_wayland_display_open (const char *display_name)
       return NULL;
     }
 
+  display_wayland->initial_globals_done = TRUE;
   process_on_globals_closures (display_wayland);
 
   /* Wait for initializing to complete. This means waiting for all
@@ -918,6 +954,7 @@ gdk_wayland_display_dispose (GObject *object)
 
   g_clear_list (&display_wayland->on_has_globals_closures, g_free);
 
+  g_clear_pointer (&display_wayland->background_effect_manager, zsingularity_blur_manager_v1_destroy);
   g_clear_pointer (&display_wayland->compositor, wl_compositor_destroy);
   g_clear_pointer (&display_wayland->xdg_wm_base, xdg_wm_base_destroy);
   g_clear_pointer (&display_wayland->zxdg_shell_v6, zxdg_shell_v6_destroy);

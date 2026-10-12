@@ -687,6 +687,191 @@ test_inherit (void)
                       "/icons2/scalable/one-two-symbolic-rtl.svg");
 }
 
+typedef struct
+{
+  GMutex mutex;
+  GCond cond;
+  gboolean stopped;
+  gboolean release;
+  GObject *object;
+} IconReleaseData;
+
+static IconReleaseData *release_data;
+static void (*icon_finalize) (GObject *object);
+static void (*icon_dispose) (GObject *object);
+
+static void
+pause_icon_release (GObject  *object,
+                    gboolean  finalizing)
+{
+  IconReleaseData *state = release_data;
+
+  if (state != NULL && object == state->object)
+    {
+      if (finalizing)
+        g_assert_cmpuint (g_atomic_int_get (&object->ref_count), ==, 0);
+      else
+        g_assert_cmpuint (g_atomic_int_get (&object->ref_count), >, 0);
+      g_mutex_lock (&state->mutex);
+      state->stopped = TRUE;
+      g_cond_signal (&state->cond);
+      while (!state->release)
+        g_cond_wait (&state->cond, &state->mutex);
+      g_mutex_unlock (&state->mutex);
+    }
+}
+
+static void
+icon_finalizing (GObject *object)
+{
+  pause_icon_release (object, TRUE);
+  icon_finalize (object);
+}
+
+static void
+icon_disposing (GObject *object)
+{
+  pause_icon_release (object, FALSE);
+  icon_dispose (object);
+}
+
+static gpointer
+unref_icon (gpointer data)
+{
+  g_object_unref (data);
+  return NULL;
+}
+
+static void
+test_cache_finalizing (void)
+{
+  GtkIconTheme *theme = get_test_icontheme (TRUE);
+  GObjectClass *klass = g_type_class_ref (GTK_TYPE_ICON_PAINTABLE);
+
+  icon_finalize = klass->finalize;
+  klass->finalize = icon_finalizing;
+
+  for (unsigned int i = 0; i < 64; i++)
+    {
+      IconReleaseData state = { 0 };
+      GtkIconPaintable *icon;
+      GtkIconPaintable *replacement;
+      GtkIconPaintable *cached;
+      GThread *thread;
+      gint64 deadline;
+      int size;
+
+      g_mutex_init (&state.mutex);
+      g_cond_init (&state.cond);
+      icon = gtk_icon_theme_lookup_icon (theme, "everything-symbolic", NULL,
+                                         256, 1, GTK_TEXT_DIR_NONE, 0);
+      g_assert_nonnull (icon);
+      g_object_get (icon, "size", &size, NULL);
+      g_assert_cmpint (size, ==, 256);
+      state.object = G_OBJECT (icon);
+      release_data = &state;
+      thread = g_thread_new ("icon-finalize", unref_icon, icon);
+
+      deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+      g_mutex_lock (&state.mutex);
+      while (!state.stopped)
+        g_assert_true (g_cond_wait_until (&state.cond, &state.mutex, deadline));
+      g_mutex_unlock (&state.mutex);
+
+      replacement = gtk_icon_theme_lookup_icon (theme, "everything-symbolic", NULL,
+                                                256, 1, GTK_TEXT_DIR_NONE, 0);
+      g_assert_nonnull (replacement);
+      g_assert_true (replacement != icon);
+
+      g_mutex_lock (&state.mutex);
+      state.release = TRUE;
+      g_cond_signal (&state.cond);
+      g_mutex_unlock (&state.mutex);
+      g_thread_join (thread);
+      state.object = NULL;
+
+      cached = gtk_icon_theme_lookup_icon (theme, "everything-symbolic", NULL,
+                                           256, 1, GTK_TEXT_DIR_NONE, 0);
+      g_assert_true (cached == replacement);
+      g_object_unref (cached);
+      g_object_unref (replacement);
+      g_cond_clear (&state.cond);
+      g_mutex_clear (&state.mutex);
+    }
+
+  klass->finalize = icon_finalize;
+  g_type_class_unref (klass);
+  release_data = NULL;
+}
+
+static void
+test_cache_disposing (void)
+{
+  GtkIconTheme *theme = get_test_icontheme (TRUE);
+  GObjectClass *klass = g_type_class_ref (GTK_TYPE_ICON_PAINTABLE);
+
+  icon_dispose = klass->dispose;
+  klass->dispose = icon_disposing;
+
+  for (unsigned int i = 0; i < 64; i++)
+    {
+      IconReleaseData state = { 0 };
+      GtkIconPaintable *icon;
+      GtkIconPaintable *resurrected;
+      GtkIconPaintable *replacement;
+      GtkIconPaintable *cached;
+      GThread *thread;
+      gint64 deadline;
+      int size;
+
+      g_mutex_init (&state.mutex);
+      g_cond_init (&state.cond);
+      icon = gtk_icon_theme_lookup_icon (theme, "everything-symbolic", NULL,
+                                         256, 1, GTK_TEXT_DIR_NONE, 0);
+      state.object = G_OBJECT (icon);
+      release_data = &state;
+      thread = g_thread_new ("icon-dispose", unref_icon, icon);
+
+      deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+      g_mutex_lock (&state.mutex);
+      while (!state.stopped)
+        g_assert_true (g_cond_wait_until (&state.cond, &state.mutex, deadline));
+      g_mutex_unlock (&state.mutex);
+
+      resurrected = gtk_icon_theme_lookup_icon (theme, "everything-symbolic", NULL,
+                                                256, 1, GTK_TEXT_DIR_NONE, 0);
+      g_assert_true (resurrected == icon);
+
+      g_mutex_lock (&state.mutex);
+      state.release = TRUE;
+      g_cond_signal (&state.cond);
+      g_mutex_unlock (&state.mutex);
+      g_thread_join (thread);
+      state.object = NULL;
+
+      g_object_get (resurrected, "size", &size, NULL);
+      g_assert_cmpint (size, ==, 256);
+      g_assert_nonnull (gtk_icon_paintable_get_file (resurrected));
+      replacement = gtk_icon_theme_lookup_icon (theme, "everything-symbolic", NULL,
+                                                256, 1, GTK_TEXT_DIR_NONE, 0);
+      g_assert_true (replacement != resurrected);
+      g_object_run_dispose (G_OBJECT (resurrected));
+      g_object_run_dispose (G_OBJECT (resurrected));
+      cached = gtk_icon_theme_lookup_icon (theme, "everything-symbolic", NULL,
+                                           256, 1, GTK_TEXT_DIR_NONE, 0);
+      g_assert_true (cached == replacement);
+      g_object_unref (resurrected);
+      g_object_unref (cached);
+      g_object_unref (replacement);
+      g_cond_clear (&state.cond);
+      g_mutex_clear (&state.mutex);
+    }
+
+  klass->dispose = icon_dispose;
+  g_type_class_unref (klass);
+  release_data = NULL;
+}
+
 static void
 require_env (const char *var)
 {
@@ -702,6 +887,8 @@ main (int argc, char *argv[])
   gtk_test_init (&argc, &argv);
 
   g_test_add_func ("/icontheme/basics", test_basics);
+  g_test_add_func ("/icontheme/cache-finalizing", test_cache_finalizing);
+  g_test_add_func ("/icontheme/cache-disposing", test_cache_disposing);
   g_test_add_func ("/icontheme/generic-fallback", test_generic_fallback);
   g_test_add_func ("/icontheme/force-symbolic", test_force_symbolic);
   g_test_add_func ("/icontheme/force-regular", test_force_regular);

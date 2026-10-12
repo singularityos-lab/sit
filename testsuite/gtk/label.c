@@ -229,6 +229,49 @@ test_label_parse_more (void)
   g_object_unref (label);
 }
 
+static void
+test_label_clear_attributes (void)
+{
+  for (guint i = 0; i < 4; i++)
+    {
+      GtkWidget *label = gtk_label_new (NULL);
+      PangoAttrList *original;
+      PangoAttrList *attrs;
+      PangoAttrList *current;
+
+      g_object_ref_sink (label);
+      g_test_message ("markup=%u clear-with-null=%u", i & 1, (i & 2) != 0);
+      if (i & 1)
+        gtk_label_set_markup (GTK_LABEL (label), "Hello <b>there</b>");
+      else
+        gtk_label_set_text (GTK_LABEL (label), "Hello there");
+
+      current = pango_layout_get_attributes (gtk_label_get_layout (GTK_LABEL (label)));
+      original = current ? pango_attr_list_copy (current) : pango_attr_list_new ();
+
+      attrs = pango_attr_list_new ();
+      pango_attr_list_insert (attrs, pango_attr_background_new (65535, 0, 0));
+      gtk_label_set_attributes (GTK_LABEL (label), attrs);
+      pango_attr_list_unref (attrs);
+      current = pango_layout_get_attributes (gtk_label_get_layout (GTK_LABEL (label)));
+      g_assert_nonnull (current);
+      g_assert_false (pango_attr_list_equal (original, current));
+
+      attrs = i & 2 ? NULL : pango_attr_list_new ();
+      gtk_label_set_attributes (GTK_LABEL (label), attrs);
+      if (attrs)
+        pango_attr_list_unref (attrs);
+
+      current = pango_layout_get_attributes (gtk_label_get_layout (GTK_LABEL (label)));
+      attrs = current ? pango_attr_list_ref (current) : pango_attr_list_new ();
+      g_assert_true (pango_attr_list_equal (original, attrs));
+
+      pango_attr_list_unref (attrs);
+      pango_attr_list_unref (original);
+      g_object_unref (label);
+    }
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -237,6 +280,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/label/markup-parse", test_label_markup);
   g_test_add_func ("/label/underline-parse", test_label_underline);
   g_test_add_func ("/label/parse-more", test_label_parse_more);
+  g_test_add_func ("/label/clear-attributes", test_label_clear_attributes);
 
   return g_test_run ();
 }

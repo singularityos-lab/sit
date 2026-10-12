@@ -20,6 +20,7 @@ tests = [
   { 'name': 'rgba' },
   { 'name': 'seat' },
   { 'name': 'texture-threads' },
+  { 'name': 'toplevel-icon' },
   { 'name': 'toplevellayout' },
   { 'name': 'popuplayout' },
 ]
@@ -84,6 +85,13 @@ internal_tests = [
   { 'name': 'subsurface' },
   { 'name': 'memoryformat' },
 ]
+
+if wayland_enabled
+  internal_tests += { 'name': 'waylandkeymap' }
+  internal_tests += { 'name': 'waylandkeyboard', 'sources': gdk_wayland_gen_headers }
+  internal_tests += { 'name': 'waylandpad', 'sources': gdk_wayland_gen_headers }
+  internal_tests += { 'name': 'waylandpointer', 'sources': gdk_wayland_gen_headers }
+endif
 
 internal_test_executables = []
 

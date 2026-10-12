@@ -321,7 +321,7 @@ gdk_cairo_create_similar_surface (cairo_t               *cr,
   cairo_surface_t *surface;
 
   cairo_get_matrix (cr, &matrix);
-  cairo_surface_get_device_scale (cairo_get_target (cr), &xscale, &yscale);
+  cairo_surface_get_device_scale (cairo_get_group_target (cr), &xscale, &yscale);
   det = matrix.xx * matrix.yy - matrix.xy * matrix.yx;
   if (matrix.xx != 0 || matrix.yx != 0)
     {
@@ -341,11 +341,14 @@ gdk_cairo_create_similar_surface (cairo_t               *cr,
   width = ABS (ceil (width * bounds->size.width * xscale));
   height = ABS (ceil (height * bounds->size.height * yscale));
 
-  surface = cairo_surface_create_similar (cairo_get_group_target (cr), 
+  /* create_similar() also applies the target's device scale. */
+  width = ceil (width / xscale);
+  height = ceil (height / yscale);
+  surface = cairo_surface_create_similar (cairo_get_group_target (cr),
                                           content,
                                           width, height);
-  xscale = width / bounds->size.width;
-  yscale = height / bounds->size.height;
+  xscale = floor (width * xscale) / bounds->size.width;
+  yscale = floor (height * yscale) / bounds->size.height;
   cairo_surface_set_device_scale (surface, xscale, yscale);
   cairo_surface_set_device_offset (surface,
                                    - bounds->origin.x * xscale,

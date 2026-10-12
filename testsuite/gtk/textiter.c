@@ -832,6 +832,92 @@ test_invisible_text (void)
   g_object_unref (buffer);
 }
 
+typedef struct
+{
+  const char *text;
+  int line;
+  int invisible[3][2];
+} VisibleLineFixture;
+
+static const VisibleLineFixture visible_line_fixtures[] = {
+  { "plain\nnext\n", 0, { { -1, -1 } } },
+  { "abc\nx\n", 0, { { 0, 3 }, { -1, -1 } } },
+  { "# Head\nnext\n", 0, { { 0, 2 }, { -1, -1 } } },
+  { "**a**\nnext\n", 0, { { 0, 2 }, { 3, 5 }, { -1, -1 } } },
+  { "# 中文\nnext\n", 0, { { 0, 2 }, { -1, -1 } } },
+  { "# \xF0\x9F\x98\x80\xF0\x9F\x98\x80\nnext\n", 0, { { 0, 2 }, { -1, -1 } } },
+  { "one\n# last", 1, { { 4, 6 }, { -1, -1 } } },
+  { "# Heading with a fairly long line here\nx\n", 0, { { 0, 2 }, { -1, -1 } } },
+  { "abc\nx\n", 0, { { 0, 4 }, { -1, -1 } } },
+  { "abc", 0, { { 0, 3 }, { -1, -1 } } },
+};
+
+static void
+check_visible_line_position (GtkTextIter *start,
+                             int          index,
+                             gboolean     bytes,
+                             GtkTextIter *expected)
+{
+  GtkTextIter iter = *start;
+
+  if (bytes)
+    gtk_text_iter_set_visible_line_index (&iter, index);
+  else
+    gtk_text_iter_set_visible_line_offset (&iter, index);
+  g_assert_true (gtk_text_iter_equal (&iter, expected));
+}
+
+static void
+test_visible_line_positions (gconstpointer data)
+{
+  guint mode = GPOINTER_TO_UINT (data);
+  guint i = mode / 2;
+  gboolean bytes = mode & 1;
+
+  const VisibleLineFixture *fixture = &visible_line_fixtures[i];
+  GtkTextBuffer *buffer = gtk_text_buffer_new (NULL);
+  GtkTextTag *tag;
+  GtkTextIter start, probe, expected;
+  int visible = 0;
+  int previous = -1;
+
+  gtk_text_buffer_set_text (buffer, fixture->text, -1);
+  tag = gtk_text_buffer_create_tag (buffer, NULL, "invisible", TRUE, NULL);
+  for (guint j = 0; fixture->invisible[j][0] >= 0; j++)
+    {
+      GtkTextIter a, b;
+
+      gtk_text_buffer_get_iter_at_offset (buffer, &a, fixture->invisible[j][0]);
+      gtk_text_buffer_get_iter_at_offset (buffer, &b, fixture->invisible[j][1]);
+      gtk_text_buffer_apply_tag (buffer, tag, &a, &b);
+    }
+
+  gtk_text_buffer_get_iter_at_line (buffer, &start, fixture->line);
+  probe = start;
+  /* Walk characters to find each visible index's first real position. */
+  while (!gtk_text_iter_is_end (&probe) &&
+         gtk_text_iter_get_line (&probe) == fixture->line)
+    {
+      if (visible != previous)
+        {
+          check_visible_line_position (&start, visible, bytes, &probe);
+          previous = visible;
+        }
+      if (!gtk_text_iter_has_tag (&probe, tag))
+        visible += bytes ? g_unichar_to_utf8 (gtk_text_iter_get_char (&probe), NULL) : 1;
+      gtk_text_iter_forward_char (&probe);
+    }
+
+  if (!gtk_text_buffer_get_iter_at_line (buffer, &expected, fixture->line + 1))
+    gtk_text_buffer_get_end_iter (buffer, &expected);
+  g_test_message ("fixture %u, visible length %d, byte indices %u", i, visible, bytes);
+  check_visible_line_position (&start, MAX (visible, 1), bytes, &expected);
+  check_visible_line_position (&start, MAX (visible, 1) + 1, bytes, &expected);
+  check_visible_line_position (&start, MAX (visible, 1) + 50, bytes, &expected);
+
+  g_object_unref (buffer);
+}
+
 int
 main (int argc, char** argv)
 {
@@ -850,6 +936,17 @@ main (int argc, char** argv)
   g_test_add_func ("/TextIter/Sentence Boundaries", test_sentence_boundaries);
   g_test_add_func ("/TextIter/Backward line", test_backward_line);
   g_test_add_func ("/TextIter/Invisible text", test_invisible_text);
+  for (guint i = 0; i < G_N_ELEMENTS (visible_line_fixtures); i++)
+    {
+      char *path;
+
+      path = g_strdup_printf ("/TextIter/Visible line byte indices/%u", i);
+      g_test_add_data_func (path, GUINT_TO_POINTER (2 * i + 1), test_visible_line_positions);
+      g_free (path);
+      path = g_strdup_printf ("/TextIter/Visible line character offsets/%u", i);
+      g_test_add_data_func (path, GUINT_TO_POINTER (2 * i), test_visible_line_positions);
+      g_free (path);
+    }
 
   return g_test_run();
 }

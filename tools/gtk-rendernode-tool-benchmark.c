@@ -34,7 +34,10 @@ static void
 benchmark_node (GskRenderNode *node,
                 const char    *renderer_name,
                 guint          runs,
-                gboolean       download)
+                gboolean       download,
+                guint          warmup,
+                gboolean       csv,
+                gboolean       record_warmup)
 {
   GError *error = NULL;
   GskRenderer *renderer;
@@ -48,14 +51,22 @@ benchmark_node (GskRenderNode *node,
       return;
     }
 
-  for (i = 0; i < runs; i++)
+  if (csv)
+    g_print ("renderer,type,run,render_us,download_us%s\n", record_warmup ? ",phase" : "");
+  for (i = 0; i < runs + warmup; i++)
     {
       GdkTexture *texture;
-      gint64 start_time, end_time, duration;
+      gint64 start_time, render_time, end_time, duration;
 
       start_time = g_get_monotonic_time ();
 
       texture = gsk_renderer_render_texture (renderer, node, NULL);
+      if (texture == NULL)
+        {
+          g_printerr ("Renderer %s failed to render the node\n", renderer_name);
+          exit (1);
+        }
+      render_time = g_get_monotonic_time ();
       if (download)
         {
           GdkTextureDownloader *downloader;
@@ -73,7 +84,22 @@ benchmark_node (GskRenderNode *node,
       end_time = g_get_monotonic_time ();
 
       duration = end_time - start_time;
-      g_print ("%s\t%lld.%03ds\n",
+      if (i < warmup && !record_warmup)
+        {
+          g_object_unref (texture);
+          continue;
+        }
+      if (csv)
+        {
+          g_print ("%s,%s,%u,%" G_GINT64_FORMAT ",%" G_GINT64_FORMAT,
+                    renderer_name, G_OBJECT_TYPE_NAME (renderer), i < warmup ? i : i - warmup,
+                    render_time - start_time, end_time - render_time);
+          if (record_warmup)
+            g_print (",%s", i < warmup ? "warmup" : "measured");
+          g_print ("\n");
+        }
+      else
+        g_print ("%s\t%lld.%03ds\n",
                renderer_name,
                (long long) duration / G_USEC_PER_SEC,
                (int) ((duration * 1000 / G_USEC_PER_SEC) % 1000)); 
@@ -92,10 +118,16 @@ do_benchmark (int          *argc,
   char **filenames = NULL;
   char **renderers = NULL;
   gboolean nodownload = FALSE;
+  gboolean csv = FALSE;
+  gboolean record_warmup = FALSE;
   int runs = 3;
+  int warmup = 0;
   const GOptionEntry entries[] = {
     { "renderer", 0, 0, G_OPTION_ARG_STRING_ARRAY, &renderers, N_("Add renderer to benchmark"), N_("RENDERER") },
     { "runs", 0, 0, G_OPTION_ARG_INT, &runs, N_("Number of runs with each renderer"), N_("RUNS") },
+    { "warmup", 0, 0, G_OPTION_ARG_INT, &warmup, N_("Unmeasured warmup runs"), N_("RUNS") },
+    { "csv", 0, 0, G_OPTION_ARG_NONE, &csv, N_("Print render and download times in microseconds"), NULL },
+    { "record-warmup", 0, 0, G_OPTION_ARG_NONE, &record_warmup, N_("Include warmup rows in CSV output"), NULL },
     { "no-download", 0, 0, G_OPTION_ARG_NONE, &nodownload, N_("Don’t download result/wait for GPU to finish"), NULL },
     { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &filenames, NULL, N_("FILE…") },
     { NULL, }
@@ -125,6 +157,18 @@ do_benchmark (int          *argc,
 
   g_option_context_free (context);
 
+  if (record_warmup && !csv)
+    {
+      g_printerr ("Recording warmup requires --csv\n");
+      exit (1);
+    }
+
+  if (runs <= 0 || warmup < 0 || (guint64) runs + warmup > G_MAXUINT)
+    {
+      g_printerr ("Run counts must be positive and warmup must be non-negative\n");
+      exit (1);
+    }
+
   if (filenames == NULL)
     {
       g_printerr (_("No .node file specified\n"));
@@ -144,7 +188,7 @@ do_benchmark (int          *argc,
 
   for (i = 0; renderers[i] != NULL; i++)
     {
-      benchmark_node (node, renderers[i], runs, !nodownload);
+      benchmark_node (node, renderers[i], runs, !nodownload, warmup, csv, record_warmup);
     }
 
   gsk_render_node_unref (node);

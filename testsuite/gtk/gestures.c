@@ -11,6 +11,8 @@ typedef struct {
   guint pressed : 1;
 } PointState;
 
+/* Controlled timestamps for swipe velocity tests. */
+static guint32 event_time;
 static PointState mouse_state;
 static PointState touch_state[10]; /* touchpoint 0 gets pointer emulation,
                                     * use it first in tests for consistency.
@@ -50,6 +52,9 @@ static void
 inject_event (GdkEvent *event)
 {
   gboolean handled;
+
+  if (event_time)
+    event->time = event_time;
 
   g_signal_emit_by_name (event->surface, "event", event, &handled);
 }
@@ -1530,6 +1535,85 @@ test_multitouch_interaction (void)
   g_string_free (str, TRUE);
 }
 
+typedef struct {
+  guint count;
+  double x;
+  double y;
+} SwipeData;
+
+static void
+swipe_cb (GtkGestureSwipe *gesture,
+          double           velocity_x,
+          double           velocity_y,
+          SwipeData       *data)
+{
+  data->count++;
+  data->x = velocity_x;
+  data->y = velocity_y;
+}
+
+static void
+test_swipe_cancel (gconstpointer data)
+{
+  guint mode = GPOINTER_TO_UINT (data);
+  GtkWidget *window = gtk_window_new ();
+  GtkGesture *swipe = gtk_gesture_swipe_new ();
+  GtkGesture *drag = gtk_gesture_drag_new ();
+  PointState *point = mode & 2 ? &mouse_state : &touch_state[0];
+  SwipeData result = { 0 };
+
+  *point = (PointState) { 0 };
+  gtk_window_set_default_size (GTK_WINDOW (window), 240, 200);
+  gtk_widget_add_controller (window, GTK_EVENT_CONTROLLER (swipe));
+  gtk_widget_add_controller (window, GTK_EVENT_CONTROLLER (drag));
+  if (mode & 1)
+    gtk_gesture_group (swipe, drag);
+  g_signal_connect (swipe, "swipe", G_CALLBACK (swipe_cb), &result);
+  show_toplevel (GTK_WINDOW (window));
+  g_test_message ("renderer: %s", G_OBJECT_TYPE_NAME (gtk_native_get_renderer (GTK_NATIVE (window))));
+
+  event_time = 1000;
+  point_update (point, window, 80, 80);
+  point_press (point, window, 1);
+  event_time += 16;
+  point_update (point, window, 120, 80);
+  event_time += 16;
+  point_update (point, window, 160, 80);
+  gtk_gesture_set_state (drag, mode & 1 ? GTK_EVENT_SEQUENCE_DENIED : GTK_EVENT_SEQUENCE_CLAIMED);
+  g_test_message ("cancelled swipe signals: %u", result.count);
+  g_assert_cmpuint (result.count, ==, 0);
+  event_time += 16;
+  point_release (point, 1);
+  g_assert_cmpuint (result.count, ==, 0);
+
+  event_time += 16;
+  point_update (point, window, 80, 80);
+  point_press (point, window, 1);
+  event_time += 16;
+  point_release (point, 1);
+  g_test_message ("tap swipe signals: %u, velocity: %g %g", result.count, result.x, result.y);
+  g_assert_cmpuint (result.count, ==, 1);
+  g_assert_cmpfloat (result.x, ==, 0);
+  g_assert_cmpfloat (result.y, ==, 0);
+
+  event_time += 200;
+  point_press (point, window, 1);
+  event_time += 16;
+  point_update (point, window, 120, 80);
+  event_time += 16;
+  point_update (point, window, 160, 80);
+  event_time += 16;
+  point_release (point, 1);
+  g_test_message ("normal swipe signals: %u, velocity: %g %g", result.count, result.x, result.y);
+  g_assert_cmpuint (result.count, ==, 2);
+  g_assert_cmpfloat (result.x, >, 0);
+  g_assert_cmpfloat (result.y, ==, 0);
+
+  event_time = 0;
+  *point = (PointState) { 0 };
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1544,6 +1628,10 @@ main (int argc, char *argv[])
   g_test_add_func ("/gestures/claim/early-capture", test_early_claim_capture);
   g_test_add_func ("/gestures/claim/late-capture", test_late_claim_capture);
   g_test_add_func ("/gestures/group", test_group);
+  g_test_add_data_func ("/gestures/swipe/touch/grouped", GUINT_TO_POINTER (1), test_swipe_cancel);
+  g_test_add_data_func ("/gestures/swipe/touch/claimed", GUINT_TO_POINTER (0), test_swipe_cancel);
+  g_test_add_data_func ("/gestures/swipe/pointer/grouped", GUINT_TO_POINTER (3), test_swipe_cancel);
+  g_test_add_data_func ("/gestures/swipe/pointer/claimed", GUINT_TO_POINTER (2), test_swipe_cancel);
 #if 0
   g_test_add_func ("/gestures/grabs/gestures-outside-grab", test_gestures_outside_grab);
   g_test_add_func ("/gestures/grabs/gestures-inside-grab", test_gestures_inside_grab);

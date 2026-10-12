@@ -19,11 +19,20 @@
 #pragma once
 
 #include <gdk/gdk.h>
+#include <gsk/gsk.h>
 
 #include "gtkwindow.h"
 #include "gtkpointerfocusprivate.h"
 
 G_BEGIN_DECLS
+
+gboolean        _gtk_window_set_border_widget      (GtkWindow *window,
+                                                    GtkWidget *widget);
+
+gboolean        _gtk_window_get_border_box         (GtkWindow      *window,
+                                                    GskRoundedRect *box);
+gboolean        _gtk_window_update_border_geometry (GtkWindow      *window,
+                                                    GskRoundedRect *box);
 
 void            _gtk_window_group_add_grab    (GtkWindowGroup *window_group,
                                                GtkWidget      *widget);
@@ -121,6 +130,9 @@ void gtk_window_grab_notify (GtkWindow *window,
                              GtkWidget *old_grab_widget,
                              GtkWidget *new_grab_widget,
                              gboolean   from_grab);
+
+void _gtk_window_invalidate_border_region (GtkWindow *window,
+                                           GtkWidget *widget);
 
 G_END_DECLS
 

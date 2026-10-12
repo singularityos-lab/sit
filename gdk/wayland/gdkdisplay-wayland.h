@@ -46,6 +46,7 @@
 #include <gdk/wayland/cursor-shape-v1-client-protocol.h>
 #include <gdk/wayland/xdg-toplevel-icon-v1-client-protocol.h>
 #include <gdk/wayland/xx-session-management-v1-client-protocol.h>
+#include <gdk/wayland/singularity-blur-unstable-v1-client-protocol.h>
 
 #include <glib.h>
 #include <gdk/gdkkeys.h>
@@ -164,6 +165,11 @@ struct _GdkWaylandDisplay
   char *session_id;
 
   gint64 last_bell_time_ms;
+
+  gboolean initial_globals_done;
+
+  struct zsingularity_blur_manager_v1 *background_effect_manager;
+  uint32_t background_effect_manager_id;
 };
 
 struct _GdkWaylandDisplayClass

@@ -655,11 +655,9 @@ gdk_wayland_seat_flush_frame_event (GdkWaylandSeat *seat)
                                           seat->pointer_info.frame.event);
       seat->pointer_info.frame.event = NULL;
     }
-  else
-    {
-      flush_scroll_event (seat, &seat->pointer_info.frame);
-      seat->pointer_info.frame.source = 0;
-    }
+
+  flush_scroll_event (seat, &seat->pointer_info.frame);
+  seat->pointer_info.frame.source = 0;
 }
 
 static void
@@ -668,7 +666,11 @@ gdk_wayland_seat_set_frame_event (GdkWaylandSeat *seat,
 {
   if (seat->pointer_info.frame.event &&
       gdk_event_get_event_type (seat->pointer_info.frame.event) != gdk_event_get_event_type (event))
-    gdk_wayland_seat_flush_frame_event (seat);
+    {
+      /* Keep axis data until wl_pointer.frame completes the group. */
+      _gdk_wayland_display_deliver_event (gdk_seat_get_display (GDK_SEAT (seat)),
+                                          seat->pointer_info.frame.event);
+    }
 
   seat->pointer_info.frame.event = event;
 }
@@ -736,6 +738,8 @@ pointer_handle_leave (void              *data,
 
   if (!seat->pointer_info.focus)
     return;
+
+  gdk_wayland_seat_flush_frame_event (seat);
 
   grab = _gdk_display_get_last_device_grab (seat->display,
                                             seat->logical_pointer);
@@ -1190,8 +1194,6 @@ deliver_key_event (GdkWaylandSeat *seat,
 
   begin_time = g_get_monotonic_time ();
 
-  stop_key_repeat (seat);
-
   keymap = seat->keymap;
   xkb_state = _gdk_wayland_keymap_get_xkb_state (keymap);
   xkb_keymap = _gdk_wayland_keymap_get_xkb_keymap (keymap);
@@ -1265,23 +1267,33 @@ deliver_key_event (GdkWaylandSeat *seat,
     return;
 
   if (!get_key_repeat (seat, &delay, &interval))
-    return;
+    {
+      stop_key_repeat (seat);
+      return;
+    }
 
   if (!from_key_repeat)
     {
       if (state) /* Another key is pressed */
         {
           seat->repeat_key = key;
+          seat->repeat_count = 0;
         }
       else if (seat->repeat_key == key) /* Repeated key is released */
         {
+          stop_key_repeat (seat);
           seat->repeat_key = 0;
+        }
+      else
+        {
+          return;
         }
     }
 
   if (!seat->repeat_key)
     return;
 
+  stop_key_repeat (seat);
   seat->repeat_count++;
 
   interval *= 1000L;
@@ -1511,7 +1523,6 @@ keyboard_handle_key (void               *data,
 
   seat->keyboard_time = time;
   seat->keyboard_key_serial = serial;
-  seat->repeat_count = 0;
   deliver_key_event (data, time, key + 8, press, repeat);
 }
 
@@ -2262,6 +2273,7 @@ _gdk_wayland_seat_remove_tablet_pad (GdkWaylandSeat          *seat,
                                      GdkWaylandTabletPadData *pad)
 {
   seat->tablet_pads = g_list_remove (seat->tablet_pads, pad);
+  g_clear_object (&pad->focus);
 
   if (pad->device)
     {
@@ -3376,7 +3388,10 @@ tablet_pad_ring_handle_frame (void                          *data,
   GDK_SEAT_DEBUG (seat, EVENTS,
                   "tablet pad ring handle frame, ring = %p", wp_tablet_pad_ring);
 
-  event = gdk_pad_event_new_ring (seat->keyboard_focus,
+  if (!pad->focus)
+    return;
+
+  event = gdk_pad_event_new_ring (pad->focus,
                                   pad->device,
                                   time,
                                   g_list_index (pad->mode_groups, group),
@@ -3453,7 +3468,10 @@ tablet_pad_strip_handle_frame (void                           *data,
                   "tablet pad strip handle frame, strip = %p",
                   wp_tablet_pad_strip);
 
-  event = gdk_pad_event_new_strip (seat->keyboard_focus,
+  if (!pad->focus)
+    return;
+
+  event = gdk_pad_event_new_strip (pad->focus,
                                    pad->device,
                                    time,
                                    g_list_index (pad->mode_groups, group),
@@ -3577,9 +3595,13 @@ tablet_pad_group_handle_mode (void                           *data,
 
   group->mode_switch_serial = serial;
   group->current_mode = mode;
+
+  if (!pad->focus)
+    return;
+
   n_group = g_list_index (pad->mode_groups, group);
 
-  event = gdk_pad_event_new_group_mode (seat->keyboard_focus,
+  event = gdk_pad_event_new_group_mode (pad->focus,
                                         pad->device,
                                         time,
                                         n_group,
@@ -3616,7 +3638,10 @@ tablet_pad_dial_handle_frame (void                          *data,
   GDK_SEAT_DEBUG (seat, EVENTS,
                   "tablet pad dial handle frame, dial = %p", wp_tablet_pad_dial);
 
-  event = gdk_pad_event_new_dial (seat->keyboard_focus,
+  if (!pad->focus)
+    return;
+
+  event = gdk_pad_event_new_dial (pad->focus,
                                   pad->device,
                                   time,
                                   g_list_index (pad->mode_groups, group),
@@ -3743,6 +3768,9 @@ tablet_pad_handle_button (void                     *data,
 
   group = tablet_pad_lookup_button_group (pad, button);
 
+  if (!pad->focus)
+    return;
+
 #ifdef G_DISABLE_ASSERT
   if (group == NULL)
     return;
@@ -3755,7 +3783,7 @@ tablet_pad_handle_button (void                     *data,
   event = gdk_pad_event_new_button (state == ZWP_TABLET_PAD_V2_BUTTON_STATE_PRESSED
                                        ? GDK_PAD_BUTTON_PRESS
                                        : GDK_PAD_BUTTON_RELEASE,
-                                    GDK_WAYLAND_SEAT (pad->seat)->keyboard_focus,
+                                    pad->focus,
                                     pad->device,
                                     time,
                                     n_group,
@@ -3774,10 +3802,20 @@ tablet_pad_handle_enter (void                     *data,
 {
   GdkWaylandTabletPadData *pad = data;
   GdkWaylandTabletData *tablet = zwp_tablet_v2_get_user_data (wp_tablet);
+  GdkSurface *focus;
 
   GDK_SEAT_DEBUG (pad->seat, EVENTS,
                   "tablet pad handle enter, pad = %p, tablet = %p surface = %p",
                   wp_tablet_pad, wp_tablet, surface);
+
+  if (!surface)
+    return;
+
+  focus = wl_surface_get_user_data (surface);
+  if (!GDK_IS_SURFACE (focus))
+    return;
+
+  g_set_object (&pad->focus, focus);
 
   if (pad->device && pad->current_tablet != tablet)
     {
@@ -3830,6 +3868,8 @@ tablet_pad_handle_leave (void                     *data,
   GDK_SEAT_DEBUG (pad->seat, EVENTS,
                   "tablet pad handle leave, pad = %p, surface = %p",
                   wp_tablet_pad, surface);
+
+  g_clear_object (&pad->focus);
 
   if (pad->current_tablet)
     {

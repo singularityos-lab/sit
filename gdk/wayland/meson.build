@@ -39,7 +39,10 @@ gdk_wayland_public_headers = files([
   'gdkwaylandtoplevel.h',
 ])
 
-install_headers(gdk_wayland_public_headers, 'gdkwayland.h', subdir: 'gtk-4.0/gdk/wayland/')
+sit_wayland_sources = files('sitwaylandsurface.c')
+sit_wayland_public_headers = files('sitwaylandsurface.h')
+
+install_headers(gdk_wayland_public_headers, sit_wayland_public_headers, 'gdkwayland.h', subdir: 'gtk-4.0/gdk/wayland/')
 
 gdk_wayland_deps = [
   shmlib,
@@ -55,6 +58,11 @@ gdk_wayland_deps = [
 #  - version: protocol version
 #  - required: wayland_protocols version check
 proto_sources = [
+  {
+    'name': 'singularity-blur-unstable',
+    'stability': 'private',
+    'version': 1,
+  },
   {
     'name': 'gtk-shell',
     'stability': 'private',
@@ -215,7 +223,7 @@ foreach p: proto_sources
 endforeach
 
 libgdk_wayland = static_library('gdk-wayland',
-  sources: [ gdk_wayland_sources, gdk_wayland_gen_headers, gdk_gen_headers ],
+  sources: [ gdk_wayland_sources, sit_wayland_sources, gdk_wayland_gen_headers, gdk_gen_headers ],
   include_directories: [ confinc, gdkinc, ],
   c_args: [
     '-DGTK_COMPILATION',

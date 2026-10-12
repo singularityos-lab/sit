@@ -90,6 +90,9 @@ VkDevice                gdk_vulkan_context_get_device                   (GdkVulk
 VkQueue                 gdk_vulkan_context_get_queue                    (GdkVulkanContext      *context);
 uint32_t                gdk_vulkan_context_get_queue_family_index       (GdkVulkanContext      *context);
 VkFormat                gdk_vulkan_context_get_image_format             (GdkVulkanContext      *context);
+G_GNUC_INTERNAL void    gdk_vulkan_context_set_image_usage              (GdkVulkanContext      *context,
+                                                                         VkImageUsageFlags      usage);
+G_GNUC_INTERNAL void    gdk_vulkan_context_abort_frame                  (GdkVulkanContext      *context);
 GdkMemoryFormat         gdk_vulkan_context_get_memory_format            (GdkVulkanContext      *context);
 uint32_t                gdk_vulkan_context_get_n_images                 (GdkVulkanContext      *context);
 VkImage                 gdk_vulkan_context_get_image                    (GdkVulkanContext      *context,
