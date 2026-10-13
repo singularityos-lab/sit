@@ -12378,6 +12378,8 @@ gtk_widget_create_render_node (GtkWidget   *widget,
       gtk_snapshot_pop (snapshot); /* clip */
     }
 
+  _sit_widget_snapshot_glass (widget, snapshot, gtk_css_boxes_get_border_box (&boxes));
+
   gtk_css_style_snapshot_background (&boxes, snapshot);
   gtk_css_style_snapshot_border (&boxes, snapshot);
 

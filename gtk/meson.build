@@ -645,7 +645,7 @@ install_headers(gtk_deprecated_headers, subdir: 'gtk-4.0/gtk/deprecated')
 install_headers(gtk_print_headers, subdir: 'gtk-4.0/gtk/print')
 
 sit_gtk_public_headers = files('sit.h')
-sit_gtk_sources = files('sitwidget.c')
+sit_gtk_sources = files('sitwidget.c', 'sitglass.c')
 install_headers(sit_gtk_public_headers, subdir: 'gtk-4.0/gtk/')
 
 gtk_sources = gtk_public_sources + gtk_private_sources + sit_gtk_sources

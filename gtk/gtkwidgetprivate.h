@@ -54,6 +54,10 @@ gboolean      _gtk_widget_set_visual_transform (GtkWidget    *widget,
                                                 GskTransform *transform);
 GskTransform *_gtk_widget_get_visual_transform (GtkWidget    *widget);
 
+void _sit_widget_snapshot_glass (GtkWidget            *widget,
+                                 GtkSnapshot          *snapshot,
+                                 const GskRoundedRect *border_box);
+
 
 typedef gboolean (*GtkSurfaceTransformChangedCallback) (GtkWidget               *widget,
                                                         const graphene_matrix_t *surface_transform,

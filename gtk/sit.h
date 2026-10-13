@@ -38,4 +38,25 @@ cairo_region_t *sit_widget_create_border_region (GtkWidget    *widget,
                                                  GtkWidget    *transform_widget,
                                                  GskTransform *transform);
 
+typedef struct _SitGlass SitGlass;
+
+struct _SitGlass
+{
+  float blur;
+  float refraction;
+  float bezel;
+  float zoom;
+  float saturation;
+  float opacity;
+};
+
+GDK_AVAILABLE_IN_ALL
+void sit_snapshot_append_glass (GtkSnapshot          *snapshot,
+                                const GskRoundedRect *shape,
+                                const SitGlass       *glass);
+
+GDK_AVAILABLE_IN_ALL
+gboolean sit_widget_set_glass (GtkWidget      *widget,
+                               const SitGlass *glass);
+
 G_END_DECLS
