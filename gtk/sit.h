@@ -59,4 +59,7 @@ GDK_AVAILABLE_IN_ALL
 gboolean sit_widget_set_glass (GtkWidget      *widget,
                                const SitGlass *glass);
 
+GDK_AVAILABLE_IN_ALL
+gboolean sit_widget_get_glass_accelerated (GtkWidget *widget);
+
 G_END_DECLS

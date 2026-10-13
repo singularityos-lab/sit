@@ -3,6 +3,12 @@
 #include "sit.h"
 #include "gtkwidgetprivate.h"
 #include "gsk/gskdisplacementnodeprivate.h"
+#include "gsk/gpu/gskglrenderer.h"
+#include "gsk/gpu/gskvulkanrenderer.h"
+#include "gdk/gdkdisplayprivate.h"
+#include "gdk/gdkvulkancontextprivate.h"
+
+#include <epoxy/gl.h>
 
 #include <math.h>
 #include <string.h>
@@ -27,6 +33,7 @@ typedef struct {
 } MapEntry;
 
 static GQuark quark_sit_glass;
+static GQuark quark_software_gl;
 static GHashTable *map_cache;
 
 static guint
@@ -361,6 +368,83 @@ sit_widget_set_glass (GtkWidget      *widget,
   return TRUE;
 }
 
+static gboolean
+display_has_software_gl (GdkDisplay *display)
+{
+  gpointer cached;
+  GdkGLContext *context;
+  const char *renderer;
+  gboolean software = FALSE;
+
+  if (quark_software_gl == 0)
+    quark_software_gl = g_quark_from_static_string ("sit-software-gl");
+
+  cached = g_object_get_qdata (G_OBJECT (display), quark_software_gl);
+  if (cached)
+    return GPOINTER_TO_INT (cached) == 2;
+
+  context = gdk_display_get_gl_context (display);
+  if (context)
+    {
+      gdk_gl_context_make_current (context);
+      renderer = (const char *) glGetString (GL_RENDERER);
+      software = renderer != NULL &&
+                 (strstr (renderer, "llvmpipe") != NULL ||
+                  strstr (renderer, "softpipe") != NULL ||
+                  strstr (renderer, "Software") != NULL);
+    }
+
+  g_object_set_qdata (G_OBJECT (display), quark_software_gl, GINT_TO_POINTER (software ? 2 : 1));
+
+  return software;
+}
+
+/**
+ * sit_widget_get_glass_accelerated:
+ * @widget: a realized widget
+ *
+ * Tells whether glass drawn in @widget's window runs on a GPU. Glass is
+ * not drawn by [method@Sit.widget_set_glass] when the window renders with
+ * Cairo, a software OpenGL driver or a CPU Vulkan device, since
+ * refraction there costs whole frames.
+ *
+ * Returns: %TRUE if the window renders on a GPU
+ */
+gboolean
+sit_widget_get_glass_accelerated (GtkWidget *widget)
+{
+  GtkNative *native;
+  GskRenderer *renderer;
+
+  g_return_val_if_fail (GTK_IS_WIDGET (widget), FALSE);
+
+  native = gtk_widget_get_native (widget);
+  if (native == NULL)
+    return FALSE;
+
+  renderer = gtk_native_get_renderer (native);
+  if (renderer == NULL)
+    return FALSE;
+
+  if (GSK_IS_GL_RENDERER (renderer))
+    return !display_has_software_gl (gtk_widget_get_display (widget));
+
+#ifdef GDK_RENDERING_VULKAN
+  if (GSK_IS_VULKAN_RENDERER (renderer))
+    {
+      GdkDisplay *display = gtk_widget_get_display (widget);
+      VkPhysicalDeviceProperties props;
+
+      if (display->vk_physical_device == VK_NULL_HANDLE)
+        return FALSE;
+      vkGetPhysicalDeviceProperties (display->vk_physical_device, &props);
+      return props.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU;
+    }
+#endif
+
+  return FALSE;
+}
+
 void
 _sit_widget_snapshot_glass (GtkWidget            *widget,
                             GtkSnapshot          *snapshot,
@@ -372,6 +456,6 @@ _sit_widget_snapshot_glass (GtkWidget            *widget,
     return;
 
   glass = g_object_get_qdata (G_OBJECT (widget), quark_sit_glass);
-  if (glass)
+  if (glass && sit_widget_get_glass_accelerated (widget))
     sit_snapshot_append_glass (snapshot, border_box, glass);
 }
