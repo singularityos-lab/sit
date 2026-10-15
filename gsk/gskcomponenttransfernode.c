@@ -141,10 +141,10 @@ gsk_component_transfer_node_draw (GskRenderNode *node,
           g *= a;
           b *= a;
 
-          pixel = CLAMP ((int) roundf (a * 255), 0, 255) << 24 |
-                  CLAMP ((int) roundf (r * 255), 0, 255) << 16 |
-                  CLAMP ((int) roundf (g * 255), 0, 255) << 8 |
-                  CLAMP ((int) roundf (b * 255), 0, 255) << 0;
+          pixel = (guint32) CLAMP ((int) roundf (a * 255), 0, 255) << 24 |
+                  (guint32) CLAMP ((int) roundf (r * 255), 0, 255) << 16 |
+                  (guint32) CLAMP ((int) roundf (g * 255), 0, 255) << 8 |
+                  (guint32) CLAMP ((int) roundf (b * 255), 0, 255) << 0;
 
           *(guint32 *)(pixels + y * stride + 4 * x) = pixel;
         }
