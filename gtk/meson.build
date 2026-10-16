@@ -1279,6 +1279,7 @@ if build_gir
     gnome.generate_vapi('sit-1.0',
       sources: sit_gir[0],
       packages: ['gtk4'],
+      gir_dirs: [meson.current_build_dir()],
       install: true,
     )
   endif
