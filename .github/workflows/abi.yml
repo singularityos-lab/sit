@@ -1,0 +1,38 @@
+name: ABI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  abi:
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get build-dep -y gtk4
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            abigail-tools binutils ca-certificates git meson ninja-build
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compare with the previous revision
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if [ -z "$BASE" ] || [ "$BASE" = 0000000000000000000000000000000000000000 ]; then
+            echo "No previous revision to compare with"
+            exit 0
+          fi
+          sh .github/scripts/abi-check.sh "$BASE" "$RUNNER_TEMP/abi"
