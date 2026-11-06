@@ -19,6 +19,7 @@
 
 #include "gdktexture.h"
 #include <gio/gio.h>
+#include "gdkcolorstate.h"
 
 #define PNG_SIGNATURE "\x89PNG"
 
@@ -28,6 +29,12 @@ GdkTexture *gdk_load_png        (GBytes         *bytes,
 
 GBytes     *gdk_save_png        (GdkTexture     *texture,
                                  GHashTable     *options);
+
+gboolean    gdk_png_probe       (GBytes           *bytes,
+                                 guint            *width,
+                                 guint            *height,
+                                 GdkMemoryFormat  *format,
+                                 GdkColorState   **color_state);
 
 static inline gboolean
 gdk_is_png (GBytes *bytes)

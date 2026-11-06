@@ -296,6 +296,116 @@ gdk_png_set_color_state (png_struct    *png,
 /* }}} */
 /* {{{ Public API */
 
+static gboolean
+gdk_png_read_header (png_struct       *png,
+                     png_info         *info,
+                     guint            *width,
+                     guint            *height,
+                     GdkMemoryFormat  *format,
+                     GdkColorState   **color_state,
+                     GError          **error)
+{
+  guint w, h;
+  int depth, color_type;
+  int interlace;
+  GdkMemoryFormat fmt = GDK_MEMORY_R8G8B8A8;
+
+  png_read_info (png, info);
+
+  png_get_IHDR (png, info,
+                &w, &h, &depth,
+                &color_type, &interlace, NULL, NULL);
+
+  if (color_type == PNG_COLOR_TYPE_PALETTE)
+    png_set_palette_to_rgb (png);
+
+  if (color_type == PNG_COLOR_TYPE_GRAY)
+    png_set_expand_gray_1_2_4_to_8 (png);
+
+  if (png_get_valid (png, info, PNG_INFO_tRNS))
+    png_set_tRNS_to_alpha (png);
+
+  if (depth < 8)
+    png_set_packing (png);
+
+  if (interlace != PNG_INTERLACE_NONE)
+    png_set_interlace_handling (png);
+
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN
+  png_set_swap (png);
+#endif
+
+  png_read_update_info (png, info);
+  png_get_IHDR (png, info,
+                &w, &h, &depth,
+                &color_type, &interlace, NULL, NULL);
+  if (depth != 8 && depth != 16)
+    {
+      g_set_error (error,
+                   GDK_TEXTURE_ERROR, GDK_TEXTURE_ERROR_UNSUPPORTED_CONTENT,
+                   _("Unsupported depth %u in png image"), depth);
+      return FALSE;
+    }
+
+  switch (color_type)
+    {
+    case PNG_COLOR_TYPE_RGB_ALPHA:
+      if (depth == 8)
+        {
+          fmt = GDK_MEMORY_R8G8B8A8;
+        }
+      else
+        {
+          fmt = GDK_MEMORY_R16G16B16A16;
+        }
+      break;
+    case PNG_COLOR_TYPE_RGB:
+      if (depth == 8)
+        {
+          fmt = GDK_MEMORY_R8G8B8;
+        }
+      else if (depth == 16)
+        {
+          fmt = GDK_MEMORY_R16G16B16;
+        }
+      break;
+    case PNG_COLOR_TYPE_GRAY:
+      if (depth == 8)
+        {
+          fmt = GDK_MEMORY_G8;
+        }
+      else if (depth == 16)
+        {
+          fmt = GDK_MEMORY_G16;
+        }
+      break;
+    case PNG_COLOR_TYPE_GRAY_ALPHA:
+      if (depth == 8)
+        {
+          fmt = GDK_MEMORY_G8A8;
+        }
+      else if (depth == 16)
+        {
+          fmt = GDK_MEMORY_G16A16;
+        }
+      break;
+    default:
+      g_set_error (error,
+                   GDK_TEXTURE_ERROR, GDK_TEXTURE_ERROR_UNSUPPORTED_CONTENT,
+                   _("Unsupported color type %u in png image"), color_type);
+      return FALSE;
+    }
+
+  *color_state = gdk_png_get_color_state (png, info, error);
+  if (*color_state == NULL)
+    return FALSE;
+
+  *width = w;
+  *height = h;
+  *format = fmt;
+  return TRUE;
+}
+
 GdkTexture *
 gdk_load_png (GBytes      *bytes,
               GHashTable  *options,
@@ -308,8 +418,6 @@ gdk_load_png (GBytes      *bytes,
   int num_texts;
   guint width, height;
   gsize i;
-  int depth, color_type;
-  int interlace;
   GdkMemoryFormat format;
   GdkMemoryLayout layout;
   guchar *buffer = NULL;
@@ -353,97 +461,11 @@ gdk_load_png (GBytes      *bytes,
       return NULL;
     }
 
-  png_read_info (png, info);
-
-  png_get_IHDR (png, info,
-                &width, &height, &depth,
-                &color_type, &interlace, NULL, NULL);
-
-  if (color_type == PNG_COLOR_TYPE_PALETTE)
-    png_set_palette_to_rgb (png);
-
-  if (color_type == PNG_COLOR_TYPE_GRAY)
-    png_set_expand_gray_1_2_4_to_8 (png);
-
-  if (png_get_valid (png, info, PNG_INFO_tRNS))
-    png_set_tRNS_to_alpha (png);
-
-  if (depth < 8)
-    png_set_packing (png);
-
-  if (interlace != PNG_INTERLACE_NONE)
-    png_set_interlace_handling (png);
-
-#if G_BYTE_ORDER == G_LITTLE_ENDIAN
-  png_set_swap (png);
-#endif
-
-  png_read_update_info (png, info);
-  png_get_IHDR (png, info,
-                &width, &height, &depth,
-                &color_type, &interlace, NULL, NULL);
-  if (depth != 8 && depth != 16)
+  if (!gdk_png_read_header (png, info, &width, &height, &format, &color_state, error))
     {
       png_destroy_read_struct (&png, &info, NULL);
-      g_set_error (error,
-                   GDK_TEXTURE_ERROR, GDK_TEXTURE_ERROR_UNSUPPORTED_CONTENT,
-                   _("Unsupported depth %u in png image"), depth);
       return NULL;
     }
-
-  switch (color_type)
-    {
-    case PNG_COLOR_TYPE_RGB_ALPHA:
-      if (depth == 8)
-        {
-          format = GDK_MEMORY_R8G8B8A8;
-        }
-      else
-        {
-          format = GDK_MEMORY_R16G16B16A16;
-        }
-      break;
-    case PNG_COLOR_TYPE_RGB:
-      if (depth == 8)
-        {
-          format = GDK_MEMORY_R8G8B8;
-        }
-      else if (depth == 16)
-        {
-          format = GDK_MEMORY_R16G16B16;
-        }
-      break;
-    case PNG_COLOR_TYPE_GRAY:
-      if (depth == 8)
-        {
-          format = GDK_MEMORY_G8;
-        }
-      else if (depth == 16)
-        {
-          format = GDK_MEMORY_G16;
-        }
-      break;
-    case PNG_COLOR_TYPE_GRAY_ALPHA:
-      if (depth == 8)
-        {
-          format = GDK_MEMORY_G8A8;
-        }
-      else if (depth == 16)
-        {
-          format = GDK_MEMORY_G16A16;
-        }
-      break;
-    default:
-      png_destroy_read_struct (&png, &info, NULL);
-      g_set_error (error,
-                   GDK_TEXTURE_ERROR, GDK_TEXTURE_ERROR_UNSUPPORTED_CONTENT,
-                   _("Unsupported color type %u in png image"), color_type);
-      return NULL;
-    }
-
-  color_state = gdk_png_get_color_state (png, info, error);
-  if (color_state == NULL)
-    return NULL;
 
   if (!gdk_memory_layout_try_init (&layout, format, width, height, 1))
     {
@@ -501,6 +523,61 @@ gdk_load_png (GBytes      *bytes,
     }
 
   return texture;
+}
+
+gboolean
+gdk_png_probe (GBytes           *bytes,
+               guint            *width,
+               guint            *height,
+               GdkMemoryFormat  *format,
+               GdkColorState   **color_state)
+{
+  png_io io;
+  png_struct *png;
+  png_info *info;
+  GError *error = NULL;
+  gboolean ok;
+#if PNG_LIBPNG_VER < 10645
+  CICPData cicp = { FALSE, };
+#endif
+
+  io.data = (guchar *) g_bytes_get_data (bytes, &io.size);
+  io.position = 0;
+
+  png = png_create_read_struct_2 (PNG_LIBPNG_VER_STRING,
+                                  &error,
+                                  png_simple_error_callback,
+                                  png_simple_warning_callback,
+                                  NULL,
+                                  png_malloc_callback,
+                                  png_free_callback);
+  if (png == NULL)
+    return FALSE;
+
+  info = png_create_info_struct (png);
+  if (info == NULL)
+    {
+      png_destroy_read_struct (&png, NULL, NULL);
+      return FALSE;
+    }
+
+  png_set_read_fn (png, &io, png_read_func);
+#if PNG_LIBPNG_VER < 10645
+  png_set_read_user_chunk_fn (png, &cicp, png_read_chunk_func);
+#endif
+
+  if (sigsetjmp (png_jmpbuf (png), 1))
+    {
+      png_destroy_read_struct (&png, &info, NULL);
+      g_clear_error (&error);
+      return FALSE;
+    }
+
+  ok = gdk_png_read_header (png, info, width, height, format, color_state, &error);
+  png_destroy_read_struct (&png, &info, NULL);
+  g_clear_error (&error);
+
+  return ok;
 }
 
 GBytes *

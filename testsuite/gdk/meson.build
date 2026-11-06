@@ -81,6 +81,7 @@ internal_tests = [
   { 'name': 'memorytexture', 'sources': [ 'gdktestutils.c' ] },
   { 'name': 'mipmap', 'sources': [ 'gdktestutils.c' ] },
   { 'name': 'texture' },
+  { 'name': 'deferredtexture' },
   { 'name': 'gltexture' },
   { 'name': 'subsurface' },
   { 'name': 'memoryformat' },

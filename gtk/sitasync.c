@@ -1,20 +1,10 @@
 #include "config.h"
 
 #include "sit.h"
+#include "gdk/sitschedulerprivate.h"
 
 #include <gio/gio.h>
 #include <string.h>
-
-#ifdef __linux__
-#include <sched.h>
-#endif
-
-#define N_QOS 4
-#define FOREGROUND 0
-#define BACKGROUND 1
-#define IDLE_TIMEOUT (15 * G_TIME_SPAN_SECOND)
-#define DRAIN_BUDGET (2 * G_TIME_SPAN_MILLISECOND)
-#define DRAIN_PRIORITY (GDK_PRIORITY_REDRAW + 1)
 
 G_DEFINE_ENUM_TYPE (SitQos, sit_qos,
   G_DEFINE_ENUM_VALUE (SIT_QOS_INTERACTIVE, "interactive"),
@@ -22,271 +12,9 @@ G_DEFINE_ENUM_TYPE (SitQos, sit_qos,
   G_DEFINE_ENUM_VALUE (SIT_QOS_UTILITY, "utility"),
   G_DEFINE_ENUM_VALUE (SIT_QOS_BACKGROUND, "background"))
 
-typedef struct _Job Job;
-
-struct _Job
-{
-  Job *next;
-  SitQos qos;
-  void (* run) (Job *job);
-  void (* deliver) (Job *job);
-};
-
 typedef struct
 {
-  GMutex lock;
-  GCond cond[2];
-  GQueue queue[N_QOS];
-  guint workers[2];
-  guint idle[2];
-  guint woken[2];
-  guint limit[2];
-  guint utility_running;
-  guint utility_limit;
-} Scheduler;
-
-static Scheduler scheduler;
-static Job *completed[N_QOS];
-static int drain_armed;
-static GSource *drain_source;
-static Job *pending_head[N_QOS];
-static Job *pending_tail[N_QOS];
-
-static void schedule (Job *job);
-
-static gboolean
-drain (gint64 budget)
-{
-  gint64 start = g_get_monotonic_time ();
-
-  g_atomic_int_set (&drain_armed, 0);
-  for (int q = 0; q < N_QOS; q++)
-    {
-      Job *list = g_atomic_pointer_exchange (&completed[q], NULL);
-      Job *reversed = NULL;
-
-      while (list)
-        {
-          Job *next = list->next;
-          list->next = reversed;
-          reversed = list;
-          list = next;
-        }
-      if (!reversed)
-        continue;
-      if (pending_tail[q])
-        pending_tail[q]->next = reversed;
-      else
-        pending_head[q] = reversed;
-      while (reversed->next)
-        reversed = reversed->next;
-      pending_tail[q] = reversed;
-    }
-
-  for (int q = 0; q < N_QOS; q++)
-    {
-      while (pending_head[q])
-        {
-          Job *job = pending_head[q];
-
-          pending_head[q] = job->next;
-          if (!pending_head[q])
-            pending_tail[q] = NULL;
-          job->next = NULL;
-          job->deliver (job);
-          if (budget >= 0 && g_get_monotonic_time () - start >= budget)
-            goto out;
-        }
-    }
-
-out:
-  for (int q = 0; q < N_QOS; q++)
-    if (pending_head[q] || g_atomic_pointer_get (&completed[q]))
-      return TRUE;
-  return FALSE;
-}
-
-static gboolean
-drain_dispatch (GSource     *source,
-                GSourceFunc  callback,
-                gpointer     user_data)
-{
-  if (drain (DRAIN_BUDGET))
-    g_source_set_ready_time (source, 0);
-  else
-    g_source_set_ready_time (source, -1);
-  return G_SOURCE_CONTINUE;
-}
-
-static GSourceFuncs drain_funcs = {
-  .dispatch = drain_dispatch,
-};
-
-static void
-scheduler_init (void)
-{
-  static gsize initialized = 0;
-
-  if (g_once_init_enter (&initialized))
-    {
-      guint cores = MAX (2, g_get_num_processors ());
-
-      g_mutex_init (&scheduler.lock);
-      for (int k = 0; k < 2; k++)
-        g_cond_init (&scheduler.cond[k]);
-      for (int q = 0; q < N_QOS; q++)
-        g_queue_init (&scheduler.queue[q]);
-      scheduler.limit[FOREGROUND] = cores;
-      scheduler.limit[BACKGROUND] = MAX (1, cores / 4);
-      scheduler.utility_limit = MAX (1, cores / 2);
-
-      drain_source = g_source_new (&drain_funcs, sizeof (GSource));
-      g_source_set_static_name (drain_source, "[sit] async completions");
-      g_source_set_priority (drain_source, DRAIN_PRIORITY);
-      g_source_set_ready_time (drain_source, -1);
-      g_source_attach (drain_source, g_main_context_default ());
-
-      g_once_init_leave (&initialized, 1);
-    }
-}
-
-static void
-post (Job *job)
-{
-  Job **stack = &completed[job->qos];
-  Job *head;
-
-  do
-    {
-      head = g_atomic_pointer_get (stack);
-      job->next = head;
-    }
-  while (!g_atomic_pointer_compare_and_exchange (stack, head, job));
-
-  if (g_atomic_int_compare_and_exchange (&drain_armed, 0, 1))
-    g_source_set_ready_time (drain_source, 0);
-}
-
-static Job *
-pick (int kind)
-{
-  if (kind == BACKGROUND)
-    return g_queue_pop_head (&scheduler.queue[SIT_QOS_BACKGROUND]);
-
-  for (int q = SIT_QOS_INTERACTIVE; q <= SIT_QOS_USER; q++)
-    if (!g_queue_is_empty (&scheduler.queue[q]))
-      return g_queue_pop_head (&scheduler.queue[q]);
-
-  if (scheduler.utility_running < scheduler.utility_limit)
-    return g_queue_pop_head (&scheduler.queue[SIT_QOS_UTILITY]);
-
-  return NULL;
-}
-
-static gboolean
-has_work (int kind)
-{
-  if (kind == BACKGROUND)
-    return !g_queue_is_empty (&scheduler.queue[SIT_QOS_BACKGROUND]);
-
-  return !g_queue_is_empty (&scheduler.queue[SIT_QOS_INTERACTIVE]) ||
-         !g_queue_is_empty (&scheduler.queue[SIT_QOS_USER]) ||
-         (scheduler.utility_running < scheduler.utility_limit &&
-          !g_queue_is_empty (&scheduler.queue[SIT_QOS_UTILITY]));
-}
-
-static gpointer
-worker_main (gpointer data)
-{
-  int kind = GPOINTER_TO_INT (data);
-
-#ifdef SCHED_IDLE
-  if (kind == BACKGROUND)
-    {
-      struct sched_param param = { 0 };
-
-      sched_setscheduler (0, SCHED_IDLE, &param);
-    }
-#endif
-
-  g_mutex_lock (&scheduler.lock);
-  for (;;)
-    {
-      Job *job = pick (kind);
-
-      if (job)
-        {
-          gboolean utility = job->qos == SIT_QOS_UTILITY;
-
-          if (utility)
-            scheduler.utility_running++;
-          g_mutex_unlock (&scheduler.lock);
-          job->run (job);
-          g_mutex_lock (&scheduler.lock);
-          if (utility)
-            {
-              scheduler.utility_running--;
-              if (!g_queue_is_empty (&scheduler.queue[SIT_QOS_UTILITY]) &&
-                  scheduler.idle[FOREGROUND] > scheduler.woken[FOREGROUND])
-                {
-                  scheduler.woken[FOREGROUND]++;
-                  g_cond_signal (&scheduler.cond[FOREGROUND]);
-                }
-            }
-          continue;
-        }
-
-      scheduler.idle[kind]++;
-      gboolean signaled = g_cond_wait_until (&scheduler.cond[kind], &scheduler.lock,
-                                             g_get_monotonic_time () + IDLE_TIMEOUT);
-      scheduler.idle[kind]--;
-      if (scheduler.woken[kind] > 0)
-        scheduler.woken[kind]--;
-      if (!signaled && !has_work (kind))
-        break;
-    }
-  scheduler.workers[kind]--;
-  g_mutex_unlock (&scheduler.lock);
-
-  return NULL;
-}
-
-static void
-schedule (Job *job)
-{
-  int kind = job->qos == SIT_QOS_BACKGROUND ? BACKGROUND : FOREGROUND;
-  gboolean inline_run = FALSE;
-
-  scheduler_init ();
-
-  g_mutex_lock (&scheduler.lock);
-  g_queue_push_tail (&scheduler.queue[job->qos], job);
-  if (scheduler.idle[kind] > scheduler.woken[kind])
-    {
-      scheduler.woken[kind]++;
-      g_cond_signal (&scheduler.cond[kind]);
-    }
-  else if (scheduler.workers[kind] < scheduler.limit[kind])
-    {
-      GThread *thread;
-
-      scheduler.workers[kind]++;
-      thread = g_thread_try_new (kind == BACKGROUND ? "sit-background" : "sit-worker",
-                                 worker_main, GINT_TO_POINTER (kind), NULL);
-      if (thread)
-        g_thread_unref (thread);
-      else if (--scheduler.workers[kind] == 0)
-        inline_run = g_queue_remove (&scheduler.queue[job->qos], job);
-    }
-  g_mutex_unlock (&scheduler.lock);
-
-  if (inline_run)
-    job->run (job);
-}
-
-typedef struct
-{
-  Job job;
+  SitJob job;
   GTask *task;
   GCancellable *cancellable;
   SitFuture *future;
@@ -297,16 +25,16 @@ typedef struct
   gpointer result;
   GError *error;
   gboolean direct;
-} TaskJob;
+} TaskSitJob;
 
 typedef void (* CancelFunc) (GTask *task);
 
 typedef struct
 {
-  Job job;
+  SitJob job;
   GTask *task;
   CancelFunc func;
-} CancelJob;
+} CancelSitJob;
 
 typedef struct
 {
@@ -315,9 +43,9 @@ typedef struct
 } CancelWatch;
 
 static void
-cancel_job_deliver (Job *job)
+cancel_job_deliver (SitJob *job)
 {
-  CancelJob *self = (CancelJob *) job;
+  CancelSitJob *self = (CancelSitJob *) job;
 
   self->func (self->task);
   g_object_unref (self->task);
@@ -329,13 +57,13 @@ cancel_watch_fired (GCancellable *cancellable,
                     gpointer      data)
 {
   CancelWatch *watch = data;
-  CancelJob *job = g_new0 (CancelJob, 1);
+  CancelSitJob *job = g_new0 (CancelSitJob, 1);
 
-  job->job.qos = SIT_QOS_INTERACTIVE;
+  job->job.qos = SIT_JOB_INTERACTIVE;
   job->job.deliver = cancel_job_deliver;
   job->task = g_object_ref (watch->task);
   job->func = watch->func;
-  post (&job->job);
+  sit_scheduler_post (&job->job);
 }
 
 static gulong
@@ -348,7 +76,7 @@ watch_cancel (GCancellable *cancellable,
   if (!cancellable)
     return 0;
 
-  scheduler_init ();
+  sit_scheduler_init ();
   watch = g_new0 (CancelWatch, 1);
   watch->func = func;
   watch->task = task;
@@ -553,14 +281,14 @@ link_clear (Link *link)
 
 typedef struct
 {
-  TaskJob base;
+  TaskSitJob base;
   Link link;
-} RunJob;
+} RunSitJob;
 
 static void
-task_job_run (Job *job)
+task_job_run (SitJob *job)
 {
-  TaskJob *self = (TaskJob *) job;
+  TaskSitJob *self = (TaskSitJob *) job;
 
   if (!g_cancellable_set_error_if_cancelled (self->cancellable, &self->error))
     self->result = self->func (self->cancellable, self->func_data, &self->error);
@@ -568,14 +296,14 @@ task_job_run (Job *job)
   if (self->direct)
     job->deliver (job);
   else
-    post (job);
+    sit_scheduler_post (job);
 }
 
 static void
-run_job_deliver (Job *job)
+run_job_deliver (SitJob *job)
 {
-  RunJob *self = (RunJob *) job;
-  TaskJob *task = &self->base;
+  RunSitJob *self = (RunSitJob *) job;
+  TaskSitJob *task = &self->base;
 
   if (task->error)
     {
@@ -621,17 +349,17 @@ sit_task_run (SitScope            *scope,
               GAsyncReadyCallback  callback,
               gpointer             user_data)
 {
-  RunJob *self;
+  RunSitJob *self;
   GMainContext *context;
 
   g_return_if_fail (scope == NULL || SIT_IS_SCOPE (scope));
   g_return_if_fail (qos <= SIT_QOS_BACKGROUND);
   g_return_if_fail (func != NULL);
 
-  scheduler_init ();
+  sit_scheduler_init ();
 
-  self = g_new0 (RunJob, 1);
-  self->base.job.qos = qos;
+  self = g_new0 (RunSitJob, 1);
+  self->base.job.qos = (SitJobClass) qos;
   self->base.job.run = task_job_run;
   self->base.job.deliver = run_job_deliver;
   self->base.cancellable = link_new (&self->link, scope, cancellable);
@@ -647,7 +375,7 @@ sit_task_run (SitScope            *scope,
   self->base.direct = context != g_main_context_default ();
   g_main_context_unref (context);
 
-  schedule (&self->base.job);
+  sit_scheduler_submit (&self->base.job);
 }
 
 /**
@@ -778,9 +506,9 @@ sit_future_init (SitFuture *self)
 }
 
 static void
-future_job_deliver (Job *job)
+future_job_deliver (SitJob *job)
 {
-  TaskJob *self = (TaskJob *) job;
+  TaskSitJob *self = (TaskSitJob *) job;
   SitFuture *future = self->future;
 
   if (future->done)
@@ -835,20 +563,20 @@ sit_future_spawn (SitScope       *scope,
                   GDestroyNotify  func_data_destroy)
 {
   SitFuture *future;
-  TaskJob *job;
+  TaskSitJob *job;
 
   g_return_val_if_fail (scope == NULL || SIT_IS_SCOPE (scope), NULL);
   g_return_val_if_fail (qos <= SIT_QOS_BACKGROUND, NULL);
   g_return_val_if_fail (func != NULL, NULL);
 
-  scheduler_init ();
+  sit_scheduler_init ();
 
   future = g_object_new (SIT_TYPE_FUTURE, NULL);
   future->cancellable = link_new (&future->link, scope, NULL);
   future->result_destroy = result_destroy;
 
-  job = g_new0 (TaskJob, 1);
-  job->job.qos = qos;
+  job = g_new0 (TaskSitJob, 1);
+  job->job.qos = (SitJobClass) qos;
   job->job.run = task_job_run;
   job->job.deliver = future_job_deliver;
   job->cancellable = g_object_ref (future->cancellable);
@@ -858,7 +586,7 @@ sit_future_spawn (SitScope       *scope,
   job->func_data_destroy = func_data_destroy;
   job->result_destroy = result_destroy;
 
-  schedule (&job->job);
+  sit_scheduler_submit (&job->job);
 
   return future;
 }
@@ -1279,32 +1007,32 @@ G_DEFINE_FINAL_TYPE (SitStream, sit_stream, G_TYPE_OBJECT)
 
 typedef struct
 {
-  Job job;
+  SitJob job;
   SitStream *stream;
-} StreamJob;
+} StreamSitJob;
 
-static void stream_job_deliver (Job *job);
+static void stream_job_deliver (SitJob *job);
 
 static void
 stream_post_locked (SitStream *self)
 {
-  StreamJob *job;
+  StreamSitJob *job;
 
   if (!self->waiter || self->posted || (self->items->len == 0 && !self->closed))
     return;
 
   self->posted = TRUE;
-  job = g_new0 (StreamJob, 1);
-  job->job.qos = SIT_QOS_USER;
+  job = g_new0 (StreamSitJob, 1);
+  job->job.qos = SIT_JOB_USER;
   job->job.deliver = stream_job_deliver;
   job->stream = g_object_ref (self);
-  post (&job->job);
+  sit_scheduler_post (&job->job);
 }
 
 static void
-stream_job_deliver (Job *job)
+stream_job_deliver (SitJob *job)
 {
-  StreamJob *self = (StreamJob *) job;
+  StreamSitJob *self = (StreamSitJob *) job;
   SitStream *stream = self->stream;
   GTask *task = NULL;
   GPtrArray *batch = NULL;
@@ -1377,7 +1105,7 @@ sit_stream_new (void)
 {
   SitStream *self = g_object_new (SIT_TYPE_STREAM, NULL);
 
-  scheduler_init ();
+  sit_scheduler_init ();
   self->items = g_ptr_array_new_with_free_func (g_object_unref);
 
   return self;
@@ -1519,17 +1247,17 @@ sit_stream_next_finish (SitStream     *self,
 
 typedef struct
 {
-  Job job;
+  SitJob job;
   SitStream *stream;
   SitStreamFunc func;
   gpointer func_data;
   GDestroyNotify func_data_destroy;
-} ProducerJob;
+} ProducerSitJob;
 
 static void
-producer_job_deliver (Job *job)
+producer_job_deliver (SitJob *job)
 {
-  ProducerJob *self = (ProducerJob *) job;
+  ProducerSitJob *self = (ProducerSitJob *) job;
 
   if (self->func_data_destroy)
     self->func_data_destroy (self->func_data);
@@ -1538,9 +1266,9 @@ producer_job_deliver (Job *job)
 }
 
 static void
-producer_job_run (Job *job)
+producer_job_run (SitJob *job)
 {
-  ProducerJob *self = (ProducerJob *) job;
+  ProducerSitJob *self = (ProducerSitJob *) job;
   GError *error = NULL;
 
   if (!g_cancellable_set_error_if_cancelled (self->stream->cancellable, &error))
@@ -1550,7 +1278,7 @@ producer_job_run (Job *job)
   sit_stream_close (self->stream, error);
   g_clear_error (&error);
 
-  post (job);
+  sit_scheduler_post (job);
 }
 
 /**
@@ -1573,7 +1301,7 @@ sit_stream_spawn (SitScope       *scope,
                   GDestroyNotify  func_data_destroy)
 {
   SitStream *self;
-  ProducerJob *job;
+  ProducerSitJob *job;
 
   g_return_val_if_fail (scope == NULL || SIT_IS_SCOPE (scope), NULL);
   g_return_val_if_fail (qos <= SIT_QOS_BACKGROUND, NULL);
@@ -1582,8 +1310,8 @@ sit_stream_spawn (SitScope       *scope,
   self = sit_stream_new ();
   self->cancellable = link_new (&self->link, scope, NULL);
 
-  job = g_new0 (ProducerJob, 1);
-  job->job.qos = qos;
+  job = g_new0 (ProducerSitJob, 1);
+  job->job.qos = (SitJobClass) qos;
   job->job.run = producer_job_run;
   job->job.deliver = producer_job_deliver;
   job->stream = g_object_ref (self);
@@ -1591,7 +1319,7 @@ sit_stream_spawn (SitScope       *scope,
   job->func_data = func_data;
   job->func_data_destroy = func_data_destroy;
 
-  schedule (&job->job);
+  sit_scheduler_submit (&job->job);
 
   return self;
 }
@@ -1605,8 +1333,5 @@ sit_stream_spawn (SitScope       *scope,
 void
 sit_async_flush (void)
 {
-  scheduler_init ();
-  while (drain (-1))
-    ;
-  g_source_set_ready_time (drain_source, -1);
+  sit_scheduler_settle ();
 }

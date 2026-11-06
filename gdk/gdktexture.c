@@ -51,6 +51,8 @@
 
 #include "gdktextureprivate.h"
 
+#include "gdkdeferredtextureprivate.h"
+
 #include "gdkcairoprivate.h"
 #include "gdkcolorstateprivate.h"
 #include "gdkmemorytextureprivate.h"
@@ -738,6 +740,10 @@ gdk_texture_new_from_bytes (GBytes  *bytes,
 
   g_return_val_if_fail (bytes != NULL, NULL);
   g_return_val_if_fail (error == NULL || *error == NULL, NULL);
+
+  texture = gdk_deferred_texture_try_new (bytes);
+  if (texture)
+    return texture;
 
   texture = gdk_texture_new_from_bytes_internal (bytes, &internal_error);
   if (texture)

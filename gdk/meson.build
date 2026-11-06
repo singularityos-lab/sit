@@ -67,6 +67,8 @@ gdk_public_sources = files([
   'gdksubsurface.c',
   'gdksurface.c',
   'gdktexture.c',
+  'gdkdeferredtexture.c',
+  'sitscheduler.c',
   'gdktexturedownloader.c',
   'gdktoplevellayout.c',
   'gdktoplevelsize.c',

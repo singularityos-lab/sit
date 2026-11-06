@@ -19,6 +19,7 @@
 
 #include "gdkmemorytexture.h"
 #include <gio/gio.h>
+#include "gdkcolorstate.h"
 
 #define JPEG_SIGNATURE "\xff\xd8"
 
@@ -26,6 +27,12 @@ GdkTexture *gdk_load_jpeg         (GBytes           *bytes,
                                    GError          **error);
 
 GBytes     *gdk_save_jpeg         (GdkTexture     *texture);
+
+gboolean    gdk_jpeg_probe       (GBytes           *bytes,
+                                 guint            *width,
+                                 guint            *height,
+                                 GdkMemoryFormat  *format,
+                                 GdkColorState   **color_state);
 
 static inline gboolean
 gdk_is_jpeg (GBytes *bytes)

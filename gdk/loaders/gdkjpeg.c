@@ -117,6 +117,65 @@ convert_cmyk_to_rgba (guchar *data,
 /* }}} */
 /* {{{ Public API */
 
+gboolean
+gdk_jpeg_probe (GBytes           *bytes,
+                guint            *width,
+                guint            *height,
+                GdkMemoryFormat  *format,
+                GdkColorState   **color_state)
+{
+  struct jpeg_decompress_struct info;
+  struct error_handler_data jerr;
+  GError *error = NULL;
+  gboolean ok = TRUE;
+
+  info.err = jpeg_std_error (&jerr.pub);
+  jerr.pub.error_exit = fatal_error_handler;
+  jerr.pub.output_message = output_message_handler;
+  jerr.error = &error;
+
+  if (sigsetjmp (jerr.setjmp_buffer, 1))
+    {
+      jpeg_destroy_decompress (&info);
+      g_clear_error (&error);
+      return FALSE;
+    }
+
+  jpeg_create_decompress (&info);
+  jpeg_mem_src (&info,
+                g_bytes_get_data (bytes, NULL),
+                g_bytes_get_size (bytes));
+  jpeg_read_header (&info, TRUE);
+  jpeg_calc_output_dimensions (&info);
+
+  switch ((int) info.out_color_space)
+    {
+    case JCS_GRAYSCALE:
+      *format = GDK_MEMORY_G8;
+      break;
+    case JCS_RGB:
+      *format = GDK_MEMORY_R8G8B8;
+      break;
+    case JCS_CMYK:
+      *format = GDK_MEMORY_R8G8B8A8_PREMULTIPLIED;
+      break;
+    default:
+      ok = FALSE;
+      break;
+    }
+
+  *width = info.output_width;
+  *height = info.output_height;
+  *color_state = gdk_color_state_ref (GDK_COLOR_STATE_SRGB);
+  jpeg_destroy_decompress (&info);
+  g_clear_error (&error);
+
+  if (!ok)
+    g_clear_pointer (color_state, gdk_color_state_unref);
+
+  return ok;
+}
+
 GdkTexture *
 gdk_load_jpeg (GBytes  *input_bytes,
                GError **error)
