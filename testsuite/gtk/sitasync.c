@@ -1,0 +1,654 @@
+#include <gtk/gtk.h>
+#include <gtk/sit.h>
+
+#ifdef __linux__
+#include <sched.h>
+#endif
+
+static GThread *main_thread;
+
+static void
+spin_until (gboolean *flag)
+{
+  while (!*flag)
+    g_main_context_iteration (NULL, TRUE);
+}
+
+static gpointer
+square (GCancellable  *cancellable,
+        gpointer       data,
+        GError       **error)
+{
+  int *value = g_new (int, 1);
+
+  g_assert_true (g_thread_self () != main_thread);
+  *value = GPOINTER_TO_INT (data) * GPOINTER_TO_INT (data);
+  return value;
+}
+
+static gpointer
+fail (GCancellable  *cancellable,
+      gpointer       data,
+      GError       **error)
+{
+  g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "broken");
+  return NULL;
+}
+
+typedef struct
+{
+  gboolean done;
+  int value;
+  GError *error;
+  GThread *thread;
+} Outcome;
+
+static void
+run_done (GObject      *source,
+          GAsyncResult *result,
+          gpointer      data)
+{
+  Outcome *outcome = data;
+  int *value = sit_task_run_finish (result, &outcome->error);
+
+  outcome->thread = g_thread_self ();
+  if (value)
+    outcome->value = *value;
+  g_free (value);
+  outcome->done = TRUE;
+}
+
+static void
+test_run_result (void)
+{
+  Outcome outcome = { 0 };
+
+  sit_task_run (NULL, SIT_QOS_USER, g_free, square, GINT_TO_POINTER (7), NULL, NULL, run_done, &outcome);
+  g_assert_false (outcome.done);
+  spin_until (&outcome.done);
+  g_assert_no_error (outcome.error);
+  g_assert_cmpint (outcome.value, ==, 49);
+  g_assert_true (outcome.thread == main_thread);
+}
+
+static void
+test_run_error (void)
+{
+  Outcome outcome = { 0 };
+
+  sit_task_run (NULL, SIT_QOS_INTERACTIVE, NULL, fail, NULL, NULL, NULL, run_done, &outcome);
+  spin_until (&outcome.done);
+  g_assert_error (outcome.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_clear_error (&outcome.error);
+}
+
+static gpointer
+must_not_run (GCancellable  *cancellable,
+              gpointer       data,
+              GError       **error)
+{
+  g_atomic_int_inc ((int *) data);
+  return NULL;
+}
+
+static void
+test_scope_cancel (void)
+{
+  SitScope *parent = sit_scope_new (NULL);
+  SitScope *child = sit_scope_new (parent);
+  Outcome outcome = { 0 };
+  int ran = 0;
+
+  sit_scope_cancel (parent);
+  g_assert_true (sit_scope_is_cancelled (child));
+  sit_task_run (child, SIT_QOS_USER, NULL, must_not_run, &ran, NULL, NULL, run_done, &outcome);
+  spin_until (&outcome.done);
+  g_assert_error (outcome.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_assert_cmpint (g_atomic_int_get (&ran), ==, 0);
+  g_clear_error (&outcome.error);
+  g_object_unref (child);
+  g_object_unref (parent);
+}
+
+static void
+test_widget_scope (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  GtkWidget *label = gtk_label_new ("x");
+  SitScope *scope;
+
+  gtk_window_set_child (GTK_WINDOW (window), label);
+  scope = g_object_ref (sit_widget_get_scope (label));
+  g_assert_true (sit_widget_get_scope (label) == scope);
+  g_assert_false (sit_scope_is_cancelled (scope));
+  gtk_window_destroy (GTK_WINDOW (window));
+  g_assert_true (sit_scope_is_cancelled (scope));
+  g_object_unref (scope);
+}
+
+typedef struct
+{
+  int qos;
+  GArray *order;
+} Tag;
+
+static int completed_count;
+
+static gpointer
+count_done (GCancellable  *cancellable,
+            gpointer       data,
+            GError       **error)
+{
+  g_atomic_int_inc (&completed_count);
+  return NULL;
+}
+
+static void
+record (GObject      *source,
+        GAsyncResult *result,
+        gpointer      data)
+{
+  Tag *tag = data;
+
+  sit_task_run_finish (result, NULL);
+  g_array_append_val (tag->order, tag->qos);
+  g_free (tag);
+}
+
+static void
+test_delivery_order (void)
+{
+  GArray *order = g_array_new (FALSE, FALSE, sizeof (int));
+  SitQos classes[] = { SIT_QOS_UTILITY, SIT_QOS_BACKGROUND, SIT_QOS_USER, SIT_QOS_INTERACTIVE };
+  const int per_class = 50;
+
+  g_atomic_int_set (&completed_count, 0);
+  for (int i = 0; i < per_class; i++)
+    for (guint c = 0; c < G_N_ELEMENTS (classes); c++)
+      {
+        Tag *tag = g_new0 (Tag, 1);
+
+        tag->qos = classes[c];
+        tag->order = order;
+        sit_task_run (NULL, classes[c], NULL, count_done, NULL, NULL, NULL, record, tag);
+      }
+
+  while (g_atomic_int_get (&completed_count) < per_class * 4)
+    g_usleep (1000);
+  g_usleep (20000);
+  while (order->len < per_class * 4)
+    g_main_context_iteration (NULL, TRUE);
+
+  g_assert_cmpuint (order->len, ==, per_class * 4);
+  for (guint i = 1; i < order->len; i++)
+    g_assert_cmpint (g_array_index (order, int, i - 1), <=, g_array_index (order, int, i));
+  g_array_unref (order);
+}
+
+static gpointer
+background_policy (GCancellable  *cancellable,
+                   gpointer       data,
+                   GError       **error)
+{
+  int *policy = g_new (int, 1);
+
+#ifdef SCHED_IDLE
+  *policy = sched_getscheduler (0);
+#else
+  *policy = -1;
+#endif
+  return policy;
+}
+
+static void
+test_background_idle (void)
+{
+  Outcome outcome = { 0 };
+
+#ifndef SCHED_IDLE
+  g_test_skip ("SCHED_IDLE is not available");
+  return;
+#else
+  sit_task_run (NULL, SIT_QOS_BACKGROUND, g_free, background_policy, NULL, NULL, NULL, run_done, &outcome);
+  spin_until (&outcome.done);
+  g_assert_no_error (outcome.error);
+  g_assert_cmpint (outcome.value, ==, SCHED_IDLE);
+#endif
+}
+
+static void
+wait_done (GObject      *source,
+           GAsyncResult *result,
+           gpointer      data)
+{
+  Outcome *outcome = data;
+  int *value = sit_future_wait_finish (SIT_FUTURE (source), result, &outcome->error);
+
+  if (value)
+    outcome->value = *value;
+  outcome->done = TRUE;
+}
+
+static void
+test_future_waiters (void)
+{
+  SitFuture *future = sit_future_spawn (NULL, SIT_QOS_USER, g_free, square, GINT_TO_POINTER (9), NULL);
+  Outcome first = { 0 }, second = { 0 }, late = { 0 };
+
+  sit_future_wait (future, NULL, wait_done, &first);
+  sit_future_wait (future, NULL, wait_done, &second);
+  spin_until (&first.done);
+  spin_until (&second.done);
+  g_assert_cmpint (first.value, ==, 81);
+  g_assert_cmpint (second.value, ==, 81);
+  g_assert_true (sit_future_is_done (future));
+  sit_future_wait (future, NULL, wait_done, &late);
+  spin_until (&late.done);
+  g_assert_cmpint (late.value, ==, 81);
+  g_object_unref (future);
+}
+
+static gpointer
+sleepy (GCancellable  *cancellable,
+        gpointer       data,
+        GError       **error)
+{
+  for (int i = 0; i < 200 && !g_cancellable_is_cancelled (cancellable); i++)
+    g_usleep (5000);
+  return NULL;
+}
+
+static void
+test_future_cancel (void)
+{
+  SitFuture *future = sit_future_spawn (NULL, SIT_QOS_USER, NULL, sleepy, NULL, NULL);
+  Outcome outcome = { 0 };
+  gint64 start = g_get_monotonic_time ();
+
+  sit_future_wait (future, NULL, wait_done, &outcome);
+  sit_future_cancel (future);
+  spin_until (&outcome.done);
+  g_assert_error (outcome.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_assert_cmpint (g_get_monotonic_time () - start, <, 500 * G_TIME_SPAN_MILLISECOND);
+  g_clear_error (&outcome.error);
+  g_object_unref (future);
+}
+
+static void
+test_wait_cancel (void)
+{
+  SitFuture *future = sit_future_spawn (NULL, SIT_QOS_USER, NULL, sleepy, NULL, NULL);
+  GCancellable *cancellable = g_cancellable_new ();
+  Outcome outcome = { 0 };
+
+  sit_future_wait (future, cancellable, wait_done, &outcome);
+  g_cancellable_cancel (cancellable);
+  spin_until (&outcome.done);
+  g_assert_error (outcome.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_assert_false (sit_future_is_done (future));
+  g_clear_error (&outcome.error);
+  sit_future_cancel (future);
+  g_object_unref (cancellable);
+  g_object_unref (future);
+}
+
+static void
+test_future_timeout (void)
+{
+  SitFuture *slow = sit_future_spawn (NULL, SIT_QOS_UTILITY, NULL, sleepy, NULL, NULL);
+  SitFuture *limited = sit_future_timeout (slow, 30);
+  SitFuture *quick_work = sit_future_spawn (NULL, SIT_QOS_USER, g_free, square, GINT_TO_POINTER (3), NULL);
+  SitFuture *fast = sit_future_timeout (quick_work, 5000);
+  Outcome timed = { 0 }, quick = { 0 };
+
+  sit_future_wait (limited, NULL, wait_done, &timed);
+  sit_future_wait (fast, NULL, wait_done, &quick);
+  spin_until (&timed.done);
+  spin_until (&quick.done);
+  g_assert_error (timed.error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+  g_assert_no_error (quick.error);
+  g_assert_cmpint (quick.value, ==, 9);
+  g_clear_error (&timed.error);
+  g_object_unref (limited);
+  g_object_unref (slow);
+  g_object_unref (fast);
+  g_object_unref (quick_work);
+}
+
+typedef struct
+{
+  gboolean done;
+  gboolean ok;
+  int index;
+  GError *error;
+} Combined;
+
+static void
+all_done (GObject      *source,
+          GAsyncResult *result,
+          gpointer      data)
+{
+  Combined *combined = data;
+
+  combined->ok = sit_future_all_finish (result, &combined->error);
+  combined->done = TRUE;
+}
+
+static void
+any_done (GObject      *source,
+          GAsyncResult *result,
+          gpointer      data)
+{
+  Combined *combined = data;
+
+  combined->index = sit_future_any_finish (result, &combined->error);
+  combined->done = TRUE;
+}
+
+static void
+race_done (GObject      *source,
+           GAsyncResult *result,
+           gpointer      data)
+{
+  Combined *combined = data;
+
+  combined->index = sit_future_race_finish (result, &combined->error);
+  combined->done = TRUE;
+}
+
+static void
+test_combinators (void)
+{
+  SitFuture *good[3];
+  SitFuture *mixed[3];
+  SitFuture *racers[2];
+  Combined all = { 0 }, all_bad = { 0 }, any = { 0 }, race = { 0 };
+
+  for (int i = 0; i < 3; i++)
+    good[i] = sit_future_spawn (NULL, SIT_QOS_USER, g_free, square, GINT_TO_POINTER (i + 1), NULL);
+  mixed[0] = sit_future_spawn (NULL, SIT_QOS_USER, NULL, fail, NULL, NULL);
+  mixed[1] = sit_future_spawn (NULL, SIT_QOS_USER, NULL, fail, NULL, NULL);
+  mixed[2] = sit_future_spawn (NULL, SIT_QOS_USER, g_free, square, GINT_TO_POINTER (4), NULL);
+  racers[0] = sit_future_spawn (NULL, SIT_QOS_UTILITY, NULL, sleepy, NULL, NULL);
+  racers[1] = sit_future_spawn (NULL, SIT_QOS_USER, g_free, square, GINT_TO_POINTER (2), NULL);
+
+  sit_future_all (good, 3, NULL, all_done, &all);
+  sit_future_all (mixed, 3, NULL, all_done, &all_bad);
+  sit_future_any (mixed, 3, NULL, any_done, &any);
+  sit_future_race (racers, 2, NULL, race_done, &race);
+  spin_until (&all.done);
+  spin_until (&all_bad.done);
+  spin_until (&any.done);
+  spin_until (&race.done);
+
+  g_assert_no_error (all.error);
+  g_assert_true (all.ok);
+  g_assert_error (all_bad.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_false (all_bad.ok);
+  g_assert_no_error (any.error);
+  g_assert_cmpint (any.index, ==, 2);
+  g_assert_no_error (race.error);
+  g_assert_cmpint (race.index, ==, 1);
+
+  g_clear_error (&all_bad.error);
+  sit_future_cancel (racers[0]);
+  for (int i = 0; i < 3; i++)
+    {
+      g_object_unref (good[i]);
+      g_object_unref (mixed[i]);
+    }
+  g_object_unref (racers[0]);
+  g_object_unref (racers[1]);
+}
+
+#define STREAM_ITEMS 20000
+
+static GObject *
+item_new (int n)
+{
+  GObject *item = g_object_new (G_TYPE_OBJECT, NULL);
+
+  g_object_set_data (item, "n", GINT_TO_POINTER (n));
+  return item;
+}
+
+static int
+item_number (gpointer item)
+{
+  return GPOINTER_TO_INT (g_object_get_data (item, "n"));
+}
+
+static gboolean
+produce (SitStream     *stream,
+         GCancellable  *cancellable,
+         gpointer       data,
+         GError       **error)
+{
+  for (int i = 0; i < STREAM_ITEMS; i++)
+    sit_stream_push (stream, item_new (i + 1));
+  if (data)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "producer failed");
+      return FALSE;
+    }
+  return TRUE;
+}
+
+typedef struct
+{
+  gboolean done;
+  int count;
+  int batches;
+  gboolean ordered;
+  GError *error;
+} Reader;
+
+static void
+read_batch (GObject      *source,
+            GAsyncResult *result,
+            gpointer      data)
+{
+  Reader *reader = data;
+  GPtrArray *batch = sit_stream_next_finish (SIT_STREAM (source), result, &reader->error);
+
+  if (!batch)
+    {
+      reader->done = TRUE;
+      return;
+    }
+
+  reader->batches++;
+  for (guint i = 0; i < batch->len; i++)
+    {
+      if (item_number (g_ptr_array_index (batch, i)) != reader->count + 1)
+        reader->ordered = FALSE;
+      reader->count++;
+    }
+  g_ptr_array_unref (batch);
+  sit_stream_next (SIT_STREAM (source), NULL, read_batch, reader);
+}
+
+static void
+test_stream_batches (void)
+{
+  SitStream *stream = sit_stream_spawn (NULL, SIT_QOS_USER, produce, NULL, NULL);
+  Reader reader = { .ordered = TRUE };
+
+  sit_stream_next (stream, NULL, read_batch, &reader);
+  spin_until (&reader.done);
+  g_assert_no_error (reader.error);
+  g_assert_cmpint (reader.count, ==, STREAM_ITEMS);
+  g_assert_true (reader.ordered);
+  g_assert_cmpint (reader.batches, <, STREAM_ITEMS / 10);
+  g_object_unref (stream);
+}
+
+static void
+test_stream_error (void)
+{
+  SitStream *stream = sit_stream_spawn (NULL, SIT_QOS_USER, produce, GINT_TO_POINTER (1), NULL);
+  Reader reader = { .ordered = TRUE };
+
+  sit_stream_next (stream, NULL, read_batch, &reader);
+  spin_until (&reader.done);
+  g_assert_cmpint (reader.count, ==, STREAM_ITEMS);
+  g_assert_error (reader.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_clear_error (&reader.error);
+  g_object_unref (stream);
+}
+
+static gpointer
+push_many (gpointer data)
+{
+  for (int i = 0; i < 5000; i++)
+    sit_stream_push (data, item_new (1));
+  return NULL;
+}
+
+typedef struct
+{
+  gboolean done;
+  int count;
+  GError *error;
+} Counter;
+
+static void
+count_batch (GObject      *source,
+             GAsyncResult *result,
+             gpointer      data)
+{
+  Counter *counter = data;
+  GPtrArray *batch = sit_stream_next_finish (SIT_STREAM (source), result, &counter->error);
+
+  if (!batch)
+    {
+      counter->done = TRUE;
+      return;
+    }
+  counter->count += batch->len;
+  g_ptr_array_unref (batch);
+  sit_stream_next (SIT_STREAM (source), NULL, count_batch, counter);
+}
+
+static void
+test_stream_threads (void)
+{
+  SitStream *stream = sit_stream_new ();
+  Counter counter = { 0 };
+  GThread *producers[4];
+
+  sit_stream_next (stream, NULL, count_batch, &counter);
+  for (int i = 0; i < 4; i++)
+    producers[i] = g_thread_new ("producer", push_many, stream);
+  for (int i = 0; i < 4; i++)
+    g_thread_join (producers[i]);
+  sit_stream_close (stream, NULL);
+  spin_until (&counter.done);
+  g_assert_no_error (counter.error);
+  g_assert_cmpint (counter.count, ==, 20000);
+  g_object_unref (stream);
+}
+
+typedef struct
+{
+  gboolean done;
+  GThread *thread;
+} OtherContext;
+
+static void
+other_done (GObject      *source,
+            GAsyncResult *result,
+            gpointer      data)
+{
+  OtherContext *other = data;
+
+  g_free (sit_task_run_finish (result, NULL));
+  other->thread = g_thread_self ();
+  other->done = TRUE;
+}
+
+static gpointer
+other_thread (gpointer data)
+{
+  OtherContext *other = data;
+  GMainContext *context = g_main_context_new ();
+
+  g_main_context_push_thread_default (context);
+  sit_task_run (NULL, SIT_QOS_USER, g_free, square, GINT_TO_POINTER (2), NULL, NULL, other_done, other);
+  while (!other->done)
+    g_main_context_iteration (context, TRUE);
+  g_main_context_pop_thread_default (context);
+  g_main_context_unref (context);
+  return NULL;
+}
+
+static void
+test_thread_default_context (void)
+{
+  OtherContext other = { 0 };
+  GThread *thread = g_thread_new ("caller", other_thread, &other);
+
+  g_thread_join (thread);
+  g_assert_true (other.done);
+  g_assert_true (other.thread == thread);
+}
+
+static gpointer
+nothing (GCancellable  *cancellable,
+         gpointer       data,
+         GError       **error)
+{
+  return NULL;
+}
+
+static void
+count_delivery (GObject      *source,
+                GAsyncResult *result,
+                gpointer      data)
+{
+  sit_task_run_finish (result, NULL);
+  (*(int *) data)++;
+}
+
+static void
+test_throughput (void)
+{
+  const int total = 100000;
+  int delivered = 0;
+  gint64 start = g_get_monotonic_time ();
+  double seconds;
+
+  for (int i = 0; i < total; i++)
+    sit_task_run (NULL, SIT_QOS_USER, NULL, nothing, NULL, NULL, NULL, count_delivery, &delivered);
+  while (delivered < total)
+    g_main_context_iteration (NULL, TRUE);
+  seconds = (g_get_monotonic_time () - start) / (double) G_TIME_SPAN_SECOND;
+  g_test_message ("%d tasks in %.3f s, %.0f per second", total, seconds, total / seconds);
+  g_assert_cmpint (delivered, ==, total);
+}
+
+int
+main (int argc, char *argv[])
+{
+  gtk_test_init (&argc, &argv, NULL);
+  main_thread = g_thread_self ();
+
+  g_test_add_func ("/sit/async/run-result", test_run_result);
+  g_test_add_func ("/sit/async/run-error", test_run_error);
+  g_test_add_func ("/sit/async/scope-cancel", test_scope_cancel);
+  g_test_add_func ("/sit/async/widget-scope", test_widget_scope);
+  g_test_add_func ("/sit/async/delivery-order", test_delivery_order);
+  g_test_add_func ("/sit/async/background-idle", test_background_idle);
+  g_test_add_func ("/sit/async/future-waiters", test_future_waiters);
+  g_test_add_func ("/sit/async/future-cancel", test_future_cancel);
+  g_test_add_func ("/sit/async/wait-cancel", test_wait_cancel);
+  g_test_add_func ("/sit/async/future-timeout", test_future_timeout);
+  g_test_add_func ("/sit/async/combinators", test_combinators);
+  g_test_add_func ("/sit/async/stream-batches", test_stream_batches);
+  g_test_add_func ("/sit/async/stream-error", test_stream_error);
+  g_test_add_func ("/sit/async/stream-threads", test_stream_threads);
+  g_test_add_func ("/sit/async/thread-default-context", test_thread_default_context);
+  g_test_add_func ("/sit/async/throughput", test_throughput);
+
+  return g_test_run ();
+}

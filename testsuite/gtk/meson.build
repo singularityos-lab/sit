@@ -28,6 +28,7 @@ tests = [
   { 'name': 'bitset' },
   { 'name': 'border' },
   { 'name': 'sitmotion' },
+  { 'name': 'sitasync' },
   { 'name': 'sitwidget' },
   { 'name': 'sitwindow' },
   {

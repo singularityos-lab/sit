@@ -62,4 +62,160 @@ gboolean sit_widget_set_glass (GtkWidget      *widget,
 GDK_AVAILABLE_IN_ALL
 gboolean sit_widget_get_glass_accelerated (GtkWidget *widget);
 
+typedef enum {
+  SIT_QOS_INTERACTIVE,
+  SIT_QOS_USER,
+  SIT_QOS_UTILITY,
+  SIT_QOS_BACKGROUND
+} SitQos;
+
+#define SIT_TYPE_QOS (sit_qos_get_type ())
+GDK_AVAILABLE_IN_ALL
+GType sit_qos_get_type (void) G_GNUC_CONST;
+
+#define SIT_TYPE_SCOPE (sit_scope_get_type ())
+GDK_AVAILABLE_IN_ALL
+G_DECLARE_FINAL_TYPE (SitScope, sit_scope, SIT, SCOPE, GObject)
+
+GDK_AVAILABLE_IN_ALL
+SitScope *sit_scope_new (SitScope *parent);
+
+GDK_AVAILABLE_IN_ALL
+void sit_scope_cancel (SitScope *self);
+
+GDK_AVAILABLE_IN_ALL
+gboolean sit_scope_is_cancelled (SitScope *self);
+
+GDK_AVAILABLE_IN_ALL
+GCancellable *sit_scope_get_cancellable (SitScope *self);
+
+GDK_AVAILABLE_IN_ALL
+SitScope *sit_widget_get_scope (GtkWidget *widget);
+
+typedef gpointer (* SitTaskFunc) (GCancellable  *cancellable,
+                                  gpointer       user_data,
+                                  GError       **error);
+
+GDK_AVAILABLE_IN_ALL
+void sit_task_run (SitScope            *scope,
+                   SitQos               qos,
+                   GDestroyNotify       result_destroy,
+                   SitTaskFunc          func,
+                   gpointer             func_data,
+                   GDestroyNotify       func_data_destroy,
+                   GCancellable        *cancellable,
+                   GAsyncReadyCallback  callback,
+                   gpointer             user_data);
+
+GDK_AVAILABLE_IN_ALL
+gpointer sit_task_run_finish (GAsyncResult  *result,
+                              GError       **error);
+
+#define SIT_TYPE_FUTURE (sit_future_get_type ())
+GDK_AVAILABLE_IN_ALL
+G_DECLARE_FINAL_TYPE (SitFuture, sit_future, SIT, FUTURE, GObject)
+
+GDK_AVAILABLE_IN_ALL
+SitFuture *sit_future_spawn (SitScope       *scope,
+                             SitQos          qos,
+                             GDestroyNotify  result_destroy,
+                             SitTaskFunc     func,
+                             gpointer        func_data,
+                             GDestroyNotify  func_data_destroy);
+
+GDK_AVAILABLE_IN_ALL
+SitFuture *sit_future_timeout (SitFuture *future,
+                               guint      timeout_ms);
+
+GDK_AVAILABLE_IN_ALL
+void sit_future_cancel (SitFuture *self);
+
+GDK_AVAILABLE_IN_ALL
+gboolean sit_future_is_done (SitFuture *self);
+
+GDK_AVAILABLE_IN_ALL
+void sit_future_wait (SitFuture           *self,
+                      GCancellable        *cancellable,
+                      GAsyncReadyCallback  callback,
+                      gpointer             user_data);
+
+GDK_AVAILABLE_IN_ALL
+gpointer sit_future_wait_finish (SitFuture     *self,
+                                 GAsyncResult  *result,
+                                 GError       **error);
+
+GDK_AVAILABLE_IN_ALL
+void sit_future_all (SitFuture           **futures,
+                     guint                 n_futures,
+                     GCancellable         *cancellable,
+                     GAsyncReadyCallback   callback,
+                     gpointer              user_data);
+
+GDK_AVAILABLE_IN_ALL
+gboolean sit_future_all_finish (GAsyncResult  *result,
+                                GError       **error);
+
+GDK_AVAILABLE_IN_ALL
+void sit_future_any (SitFuture           **futures,
+                     guint                 n_futures,
+                     GCancellable         *cancellable,
+                     GAsyncReadyCallback   callback,
+                     gpointer              user_data);
+
+GDK_AVAILABLE_IN_ALL
+int sit_future_any_finish (GAsyncResult  *result,
+                           GError       **error);
+
+GDK_AVAILABLE_IN_ALL
+void sit_future_race (SitFuture           **futures,
+                      guint                 n_futures,
+                      GCancellable         *cancellable,
+                      GAsyncReadyCallback   callback,
+                      gpointer              user_data);
+
+GDK_AVAILABLE_IN_ALL
+int sit_future_race_finish (GAsyncResult  *result,
+                            GError       **error);
+
+#define SIT_TYPE_STREAM (sit_stream_get_type ())
+GDK_AVAILABLE_IN_ALL
+G_DECLARE_FINAL_TYPE (SitStream, sit_stream, SIT, STREAM, GObject)
+
+typedef gboolean (* SitStreamFunc) (SitStream     *stream,
+                                    GCancellable  *cancellable,
+                                    gpointer       user_data,
+                                    GError       **error);
+
+GDK_AVAILABLE_IN_ALL
+SitStream *sit_stream_new (void);
+
+GDK_AVAILABLE_IN_ALL
+SitStream *sit_stream_spawn (SitScope       *scope,
+                             SitQos          qos,
+                             SitStreamFunc   func,
+                             gpointer        func_data,
+                             GDestroyNotify  func_data_destroy);
+
+GDK_AVAILABLE_IN_ALL
+void sit_stream_push (SitStream *self,
+                      GObject   *item);
+
+GDK_AVAILABLE_IN_ALL
+void sit_stream_close (SitStream    *self,
+                       const GError *error);
+
+GDK_AVAILABLE_IN_ALL
+void sit_stream_next (SitStream           *self,
+                      GCancellable        *cancellable,
+                      GAsyncReadyCallback  callback,
+                      gpointer             user_data);
+
+GDK_AVAILABLE_IN_ALL
+GPtrArray *sit_stream_next_finish (SitStream     *self,
+                                   GAsyncResult  *result,
+                                   GError       **error);
+
+GDK_AVAILABLE_IN_ALL
+void sit_async_flush (void);
+
 G_END_DECLS
