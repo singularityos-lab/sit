@@ -27,6 +27,9 @@
 #include "gtksectionmodel.h"
 #include "gtksorterprivate.h"
 #include "timsort/gtktimsortprivate.h"
+#include "gdk/sitschedulerprivate.h"
+
+#include <string.h>
 
 /* The maximum amount of items to merge for a single merge step
  *
@@ -52,6 +55,12 @@
  * and in turn reduce the total sort time.
  */
 #define GTK_SORT_STEP_TIME_US (1000) /* 1 millisecond */
+
+#define GTK_SORT_PARALLEL_MIN (16384)
+#define GTK_SORT_ASYNC_MIN (1024)
+#define GTK_SORT_CHUNK_MIN (4096)
+#define GTK_SORT_MAX_CHUNKS (64)
+#define GTK_SORT_INSERTION (32)
 
 /**
  * GtkSortListModel:
@@ -119,6 +128,8 @@ struct _GtkSortListModel
   GtkBitset *missing_keys;
 
   gpointer *positions;
+
+  struct _SortJob *job;
 };
 
 struct _GtkSortListModelClass
@@ -343,17 +354,303 @@ G_DEFINE_TYPE_WITH_CODE (GtkSortListModel, gtk_sort_list_model, G_TYPE_OBJECT,
                          G_IMPLEMENT_INTERFACE (G_TYPE_LIST_MODEL, gtk_sort_list_model_model_init)
                          G_IMPLEMENT_INTERFACE (GTK_TYPE_SECTION_MODEL, gtk_sort_list_model_section_model_init))
 
+
+typedef struct
+{
+  GtkSortKeys *keys;
+  gpointer *items;
+  gpointer *tmp;
+  gpointer *src;
+  gpointer *dst;
+  gsize n;
+  gsize width;
+  const int *cancel;
+} SortPass;
+
+static inline int
+sort_compare (GtkSortKeys *keys,
+              gpointer     a,
+              gpointer     b)
+{
+  int result = gtk_sort_keys_compare (keys, a, b);
+
+  if (result)
+    return result;
+
+  return a < b ? -1 : 1;
+}
+
+static void
+sort_merge (GtkSortKeys *keys,
+            gpointer    *src,
+            gpointer    *dst,
+            gsize        lo,
+            gsize        mid,
+            gsize        hi)
+{
+  gsize i = lo, j = mid, k = lo;
+
+  if (mid <= lo || mid >= hi || sort_compare (keys, src[mid - 1], src[mid]) < 0)
+    {
+      memcpy (dst + lo, src + lo, (hi - lo) * sizeof (gpointer));
+      return;
+    }
+
+  while (i < mid && j < hi)
+    dst[k++] = sort_compare (keys, src[i], src[j]) < 0 ? src[i++] : src[j++];
+
+  memcpy (dst + k, src + i, (mid - i) * sizeof (gpointer));
+  k += mid - i;
+  memcpy (dst + k, src + j, (hi - j) * sizeof (gpointer));
+}
+
+static void
+sort_chunk (GtkSortKeys *keys,
+            gpointer    *items,
+            gpointer    *tmp,
+            gsize        lo,
+            gsize        hi,
+            const int   *cancel)
+{
+  gpointer *src = items, *dst = tmp;
+
+  for (gsize start = lo; start < hi; start += GTK_SORT_INSERTION)
+    {
+      gsize end = MIN (start + GTK_SORT_INSERTION, hi);
+
+      for (gsize i = start + 1; i < end; i++)
+        {
+          gpointer value = items[i];
+          gsize j = i;
+
+          while (j > start && sort_compare (keys, items[j - 1], value) > 0)
+            {
+              items[j] = items[j - 1];
+              j--;
+            }
+          items[j] = value;
+        }
+    }
+
+  for (gsize width = GTK_SORT_INSERTION; width < hi - lo; width *= 2)
+    {
+      gpointer *swap;
+
+      if (g_atomic_int_get (cancel))
+        return;
+
+      for (gsize start = lo; start < hi; start += 2 * width)
+        sort_merge (keys, src, dst, start, MIN (start + width, hi), MIN (start + 2 * width, hi));
+
+      swap = src;
+      src = dst;
+      dst = swap;
+    }
+
+  if (src != items)
+    memcpy (items + lo, src + lo, (hi - lo) * sizeof (gpointer));
+}
+
+static void
+sort_chunk_cb (guint    index,
+               gpointer data)
+{
+  SortPass *pass = data;
+  gsize lo = index * pass->width;
+
+  if (g_atomic_int_get (pass->cancel))
+    return;
+
+  sort_chunk (pass->keys, pass->items, pass->tmp, lo, MIN (lo + pass->width, pass->n), pass->cancel);
+}
+
+static void
+sort_merge_cb (guint    index,
+               gpointer data)
+{
+  SortPass *pass = data;
+  gsize lo = index * 2 * pass->width;
+
+  if (g_atomic_int_get (pass->cancel))
+    return;
+
+  sort_merge (pass->keys, pass->src, pass->dst, lo,
+              MIN (lo + pass->width, pass->n),
+              MIN (lo + 2 * pass->width, pass->n));
+}
+
+static void
+sort_parallel (GtkSortKeys *keys,
+               gpointer    *items,
+               gsize        n,
+               SitJobClass  qos,
+               const int   *cancel)
+{
+  SortPass pass = { keys, items, g_new (gpointer, n), NULL, NULL, n, 0, cancel };
+  guint n_chunks = CLAMP (n / GTK_SORT_CHUNK_MIN, 1, GTK_SORT_MAX_CHUNKS);
+
+  pass.width = (n + n_chunks - 1) / n_chunks;
+  sit_scheduler_parallel (qos, n_chunks, sort_chunk_cb, &pass);
+
+  pass.src = items;
+  pass.dst = pass.tmp;
+  while (pass.width < n && !g_atomic_int_get (cancel))
+    {
+      gpointer *swap;
+
+      sit_scheduler_parallel (qos, (n + 2 * pass.width - 1) / (2 * pass.width), sort_merge_cb, &pass);
+      swap = pass.src;
+      pass.src = pass.dst;
+      pass.dst = swap;
+      pass.width *= 2;
+    }
+
+  if (pass.src != items)
+    memcpy (items, pass.src, n * sizeof (gpointer));
+
+  g_free (pass.tmp);
+}
+
+enum {
+  SORT_JOB_QUEUED,
+  SORT_JOB_RUNNING,
+  SORT_JOB_DONE,
+  SORT_JOB_CANCELLED
+};
+
+typedef struct _SortJob
+{
+  SitJob job;
+  GtkSortListModel *model;
+  GtkSortKeys *keys;
+  gpointer *items;
+  gsize n;
+  int state;
+  int cancel;
+  gboolean abandoned;
+  GMutex lock;
+  GCond cond;
+} SortJob;
+
+static gboolean
+gtk_sort_list_model_can_sort_parallel (GtkSortListModel *self,
+                                       gsize             min)
+{
+  return self->n_items >= min &&
+         self->sort.pending_runs == 0 &&
+         gtk_sort_keys_is_threadsafe (self->sort_keys) &&
+         sit_scheduler_enabled ();
+}
+
+static void
+sort_job_free (SortJob *job)
+{
+  g_object_unref (job->model);
+  gtk_sort_keys_unref (job->keys);
+  g_free (job->items);
+  g_mutex_clear (&job->lock);
+  g_cond_clear (&job->cond);
+  g_free (job);
+}
+
+static void
+sort_job_run (SitJob *sit_job)
+{
+  SortJob *job = (SortJob *) sit_job;
+
+  if (g_atomic_int_compare_and_exchange (&job->state, SORT_JOB_QUEUED, SORT_JOB_RUNNING))
+    {
+      sort_parallel (job->keys, job->items, job->n, SIT_JOB_USER, &job->cancel);
+
+      g_mutex_lock (&job->lock);
+      g_atomic_int_set (&job->state, SORT_JOB_DONE);
+      g_cond_broadcast (&job->cond);
+      g_mutex_unlock (&job->lock);
+    }
+
+  sit_scheduler_post (sit_job);
+}
+
+static void
+gtk_sort_list_model_cancel_job (GtkSortListModel *self)
+{
+  SortJob *job = self->job;
+
+  if (job == NULL)
+    return;
+
+  self->job = NULL;
+  job->abandoned = TRUE;
+  g_atomic_int_set (&job->cancel, 1);
+  if (g_atomic_int_compare_and_exchange (&job->state, SORT_JOB_QUEUED, SORT_JOB_CANCELLED))
+    return;
+
+  g_mutex_lock (&job->lock);
+  while (g_atomic_int_get (&job->state) != SORT_JOB_DONE)
+    g_cond_wait (&job->cond, &job->lock);
+  g_mutex_unlock (&job->lock);
+}
+
+static void
+sort_job_deliver (SitJob *sit_job)
+{
+  SortJob *job = (SortJob *) sit_job;
+  GtkSortListModel *self = job->model;
+  gsize start, end;
+
+  if (job->abandoned || self->job != job)
+    {
+      sort_job_free (job);
+      return;
+    }
+
+  self->job = NULL;
+
+  for (start = 0; start < job->n && job->items[start] == self->positions[start]; start++)
+    ;
+  for (end = job->n; end > start && job->items[end - 1] == self->positions[end - 1]; end--)
+    ;
+  memcpy (self->positions, job->items, job->n * sizeof (gpointer));
+  gtk_tim_sort_finish (&self->sort);
+
+  if (end > start)
+    g_list_model_items_changed (G_LIST_MODEL (self), start, end - start, end - start);
+  g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_PENDING]);
+
+  sort_job_free (job);
+}
+
+static void
+gtk_sort_list_model_start_job (GtkSortListModel *self)
+{
+  SortJob *job = g_new0 (SortJob, 1);
+
+  job->job.qos = SIT_JOB_USER;
+  job->job.run = sort_job_run;
+  job->job.deliver = sort_job_deliver;
+  job->model = g_object_ref (self);
+  job->keys = gtk_sort_keys_ref (self->sort_keys);
+  job->n = self->n_items;
+  job->items = g_memdup2 (self->positions, self->n_items * sizeof (gpointer));
+  job->state = SORT_JOB_QUEUED;
+  g_mutex_init (&job->lock);
+  g_cond_init (&job->cond);
+
+  self->job = job;
+  sit_scheduler_submit (&job->job);
+}
+
 static gboolean
 gtk_sort_list_model_is_sorting (GtkSortListModel *self)
 {
-  return self->sort_cb != 0;
+  return self->sort_cb != 0 || self->job != NULL;
 }
 
 static void
 gtk_sort_list_model_stop_sorting (GtkSortListModel *self,
                                   gsize            *runs)
 {
-  if (self->sort_cb == 0)
+  if (!gtk_sort_list_model_is_sorting (self))
     {
       if (runs)
         {
@@ -363,6 +660,7 @@ gtk_sort_list_model_stop_sorting (GtkSortListModel *self,
       return;
     }
 
+  gtk_sort_list_model_cancel_job (self);
   if (runs)
     gtk_tim_sort_get_runs (&self->sort, runs);
   gtk_tim_sort_finish (&self->sort);
@@ -409,6 +707,31 @@ gtk_sort_list_model_sort_step (GtkSortListModel *self,
       gtk_bitset_remove_all (self->missing_keys);
     }
 
+  if (!finish && self->job == NULL &&
+      gtk_sort_list_model_can_sort_parallel (self, GTK_SORT_ASYNC_MIN))
+    {
+      gtk_sort_list_model_start_job (self);
+      *out_position = 0;
+      *out_n_items = 0;
+      return TRUE;
+    }
+
+  if (finish && gtk_sort_list_model_can_sort_parallel (self, GTK_SORT_PARALLEL_MIN))
+    {
+      gpointer *before = g_memdup2 (self->positions, self->n_items * sizeof (gpointer));
+      guint start, stop;
+
+      sort_parallel (self->sort_keys, self->positions, self->n_items, SIT_JOB_INTERACTIVE, &(const int) { 0 });
+      for (start = 0; start < self->n_items && before[start] == self->positions[start]; start++)
+        ;
+      for (stop = self->n_items; stop > start && before[stop - 1] == self->positions[stop - 1]; stop--)
+        ;
+      g_free (before);
+      *out_position = stop > start ? start : 0;
+      *out_n_items = stop - start;
+      return TRUE;
+    }
+
   end_change = self->positions;
   start_change = self->positions + self->n_items;
 
@@ -449,6 +772,11 @@ gtk_sort_list_model_sort_cb (gpointer data)
     {
       if (n_items)
         g_list_model_items_changed (G_LIST_MODEL (self), pos, n_items, n_items);
+      if (self->job)
+        {
+          self->sort_cb = 0;
+          return G_SOURCE_REMOVE;
+        }
       g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_PENDING]);
       return G_SOURCE_CONTINUE;
     }
@@ -504,6 +832,7 @@ gtk_sort_list_model_finish_sorting (GtkSortListModel *self,
                                     guint            *pos,
                                     guint            *n_items)
 {
+  gtk_sort_list_model_cancel_job (self);
   gtk_tim_sort_set_max_merge_size (&self->sort, 0);
 
   gtk_sort_list_model_sort_step (self, TRUE, pos, n_items);
@@ -1382,7 +1711,7 @@ gtk_sort_list_model_get_pending (GtkSortListModel *self)
 {
   g_return_val_if_fail (GTK_IS_SORT_LIST_MODEL (self), FALSE);
 
-  if (self->sort_cb == 0)
+  if (!gtk_sort_list_model_is_sorting (self))
     return 0;
 
   /* We do a random guess that 50% of time is spent generating keys

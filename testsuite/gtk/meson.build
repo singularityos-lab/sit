@@ -29,6 +29,7 @@ tests = [
   { 'name': 'border' },
   { 'name': 'sitmotion' },
   { 'name': 'sitasync' },
+  { 'name': 'sitsort' },
   { 'name': 'sitwidget' },
   { 'name': 'sitwindow' },
   {

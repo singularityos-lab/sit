@@ -221,6 +221,7 @@ static const GtkSortKeysClass GTK_STRING_SORT_KEYS_CLASS =
   gtk_string_sort_keys_is_compatible,
   gtk_string_sort_keys_init_key,
   gtk_string_sort_keys_clear_key,
+  TRUE
 };
 
 static GtkSortKeys *

@@ -33,4 +33,12 @@ void     sit_scheduler_spawn  (SitJobClass  qos,
                                GFunc        func,
                                gpointer     object);
 
+typedef void (* SitParallelFunc) (guint    index,
+                                  gpointer data);
+
+void     sit_scheduler_parallel (SitJobClass     qos,
+                                 guint           n,
+                                 SitParallelFunc func,
+                                 gpointer        data);
+
 G_END_DECLS

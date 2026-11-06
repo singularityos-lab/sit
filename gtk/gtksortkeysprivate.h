@@ -31,6 +31,7 @@ struct _GtkSortKeys
 
   gsize key_size;
   gsize key_align; /* must be power of 2 */
+  gboolean threadsafe;
 };
 
 struct _GtkSortKeysClass
@@ -47,6 +48,7 @@ struct _GtkSortKeysClass
                                                                  gpointer                key_memory);
   void                  (* clear_key)                           (GtkSortKeys            *self,
                                                                  gpointer                key_memory);
+  gboolean              threadsafe;
 };
 
 GtkSortKeys *           gtk_sort_keys_alloc                     (const GtkSortKeysClass *klass,
@@ -66,6 +68,7 @@ GCompareDataFunc        gtk_sort_keys_get_key_compare_func      (GtkSortKeys    
 gboolean                gtk_sort_keys_is_compatible             (GtkSortKeys            *self,
                                                                  GtkSortKeys            *other);
 gboolean                gtk_sort_keys_needs_clear_key           (GtkSortKeys            *self);
+gboolean                gtk_sort_keys_is_threadsafe             (GtkSortKeys            *self);
 
 #define GTK_SORT_KEYS_ALIGN(_size,_align) (((_size) + (_align) - 1) & ~((_align) - 1))
 static inline int

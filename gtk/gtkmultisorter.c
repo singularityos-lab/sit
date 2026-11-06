@@ -181,9 +181,11 @@ gtk_multi_sort_keys_new (GtkMultiSorter *self)
   result = (GtkMultiSortKeys *) keys;
 
   result->n_keys = gtk_sorters_get_size (&self->sorters);
+  keys->threadsafe = TRUE;
   for (i = 0; i < result->n_keys; i++)
     {
       result->keys[i].keys = gtk_sorter_get_keys (gtk_sorters_get (&self->sorters, i));
+      keys->threadsafe &= gtk_sort_keys_is_threadsafe (result->keys[i].keys);
       result->keys[i].offset = GTK_SORT_KEYS_ALIGN (keys->key_size, gtk_sort_keys_get_key_align (result->keys[i].keys));
       keys->key_size = result->keys[i].offset + GTK_SORT_KEYS_ALIGN (gtk_sort_keys_get_key_size (result->keys[i].keys),
                                                                      gtk_sort_keys_get_key_align (result->keys[i].keys));

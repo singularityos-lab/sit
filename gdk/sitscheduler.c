@@ -324,3 +324,112 @@ sit_scheduler_spawn (SitJobClass  qos,
   self->object = g_object_ref (object);
   sit_scheduler_submit (&self->job);
 }
+
+typedef struct
+{
+  int ref_count;
+  guint n;
+  guint next;
+  guint done;
+  GMutex lock;
+  GCond cond;
+  SitParallelFunc func;
+  gpointer data;
+} Parallel;
+
+typedef struct
+{
+  SitJob job;
+  Parallel *parallel;
+} ParallelJob;
+
+static void
+parallel_unref (Parallel *self)
+{
+  if (!g_atomic_int_dec_and_test (&self->ref_count))
+    return;
+
+  g_mutex_clear (&self->lock);
+  g_cond_clear (&self->cond);
+  g_free (self);
+}
+
+static void
+parallel_work (Parallel *self)
+{
+  for (;;)
+    {
+      guint index = (guint) g_atomic_int_add (&self->next, 1);
+
+      if (index >= self->n)
+        break;
+
+      self->func (index, self->data);
+
+      if ((guint) g_atomic_int_add (&self->done, 1) + 1 == self->n)
+        {
+          g_mutex_lock (&self->lock);
+          g_cond_broadcast (&self->cond);
+          g_mutex_unlock (&self->lock);
+        }
+    }
+}
+
+static void
+parallel_run (SitJob *job)
+{
+  ParallelJob *self = (ParallelJob *) job;
+
+  parallel_work (self->parallel);
+  parallel_unref (self->parallel);
+  g_free (self);
+}
+
+void
+sit_scheduler_parallel (SitJobClass     qos,
+                        guint           n,
+                        SitParallelFunc func,
+                        gpointer        data)
+{
+  Parallel *self;
+  guint helpers;
+
+  if (n == 0)
+    return;
+
+  sit_scheduler_init ();
+  helpers = MIN (n - 1, scheduler.limit[FOREGROUND] - 1);
+  if (helpers == 0 || !sit_scheduler_enabled ())
+    {
+      for (guint i = 0; i < n; i++)
+        func (i, data);
+      return;
+    }
+
+  self = g_new0 (Parallel, 1);
+  self->ref_count = 1 + helpers;
+  self->n = n;
+  self->func = func;
+  self->data = data;
+  g_mutex_init (&self->lock);
+  g_cond_init (&self->cond);
+
+  for (guint i = 0; i < helpers; i++)
+    {
+      ParallelJob *job = g_new0 (ParallelJob, 1);
+
+      job->job.qos = qos == SIT_JOB_BACKGROUND ? SIT_JOB_UTILITY : qos;
+      job->job.run = parallel_run;
+      job->parallel = self;
+      sit_scheduler_submit (&job->job);
+    }
+
+  parallel_work (self);
+
+  g_mutex_lock (&self->lock);
+  while ((guint) g_atomic_int_get (&self->done) < n)
+    g_cond_wait (&self->cond, &self->lock);
+  g_mutex_unlock (&self->lock);
+
+  parallel_unref (self);
+}

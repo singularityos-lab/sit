@@ -39,8 +39,15 @@ gtk_sort_keys_alloc (const GtkSortKeysClass *klass,
 
   self->key_size = key_size;
   self->key_align = key_align;
+  self->threadsafe = klass->threadsafe;
 
   return self;
+}
+
+gboolean
+gtk_sort_keys_is_threadsafe (GtkSortKeys *self)
+{
+  return self->threadsafe;
 }
 
 GtkSortKeys *
@@ -129,7 +136,8 @@ static const GtkSortKeysClass GTK_EQUAL_SORT_KEYS_CLASS =
   gtk_equal_sort_keys_compare,
   gtk_equal_sort_keys_is_compatible,
   gtk_equal_sort_keys_init_key,
-  NULL
+  NULL,
+  TRUE
 };
 
 /*<private>

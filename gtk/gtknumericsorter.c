@@ -171,7 +171,8 @@ static const GtkSortKeysClass GTK_ASCENDING_ ## TYPE ## _SORT_KEYS_CLASS = \
   gtk_ ## key_type ## _sort_keys_compare_ascending, \
   gtk_ ## type ## _sort_keys_is_compatible, \
   gtk_ ## type ## _sort_keys_init_key, \
-  NULL \
+  NULL, \
+  TRUE \
 }; \
 \
 static const GtkSortKeysClass GTK_DESCENDING_ ## TYPE ## _SORT_KEYS_CLASS = \
@@ -180,7 +181,8 @@ static const GtkSortKeysClass GTK_DESCENDING_ ## TYPE ## _SORT_KEYS_CLASS = \
   gtk_ ## key_type ## _sort_keys_compare_descending, \
   gtk_ ## type ## _sort_keys_is_compatible, \
   gtk_ ## type ## _sort_keys_init_key, \
-  NULL \
+  NULL, \
+  TRUE \
 }; \
 \
 static gboolean \
