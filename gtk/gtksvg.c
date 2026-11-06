@@ -325,7 +325,7 @@ gtk_svg_location_init (GtkSvgLocation      *location,
   g_markup_parse_context_get_position (context, &lines, &chars);
   location->lines = lines;
   location->line_chars = chars;
-#if GLIB_CHECK_VERSION (2, 88, 0)
+#if GLIB_CHECK_VERSION (2, 88, 0) && GLIB_VERSION_MAX_ALLOWED >= GLIB_VERSION_2_88
   location->bytes = g_markup_parse_context_get_offset (context);
 #else
   location->bytes = 0;
