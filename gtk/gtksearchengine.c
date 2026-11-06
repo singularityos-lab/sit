@@ -31,6 +31,7 @@
 #if defined(HAVE_TRACKER3)
 #include "gtksearchenginetracker3private.h"
 #endif
+#include "gtksearchenginesitprivate.h"
 
 struct _GtkSearchEnginePrivate {
   GtkSearchEngine *native;
@@ -349,6 +350,13 @@ _gtk_search_engine_new (void)
       connect_engine_signals (engine->priv->native, engine);
     }
 #endif
+
+  if (engine->priv->native == NULL)
+    {
+      engine->priv->native = gtk_search_engine_sit_new ();
+      if (engine->priv->native)
+        connect_engine_signals (engine->priv->native, engine);
+    }
 
   engine->priv->hits = g_hash_table_new_full (search_hit_hash, search_hit_equal,
                                               (GDestroyNotify)_gtk_search_hit_free, NULL);

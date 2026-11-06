@@ -127,6 +127,7 @@ internal_tests = [
       testutils_lib
     ]
   },
+  { 'name': 'sitsearch' },
   { 'name': 'imcontext' },
   { 'name': 'constraint-solver' },
   { 'name': 'constraint-layout' },

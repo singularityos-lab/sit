@@ -141,6 +141,7 @@ gtk_private_sources = files([
   'gtkscaler.c',
   'gtksearchengine.c',
   'gtksearchenginemodel.c',
+  'gtksearchenginesit.c',
   'gtksecurememory.c',
   'gtksizerequestcache.c',
   'gtksortkeys.c',
