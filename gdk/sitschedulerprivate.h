@@ -28,5 +28,9 @@ void     sit_scheduler_submit (SitJob *job);
 void     sit_scheduler_post   (SitJob *job);
 gboolean sit_scheduler_drain  (gint64  budget);
 void     sit_scheduler_settle (void);
+gboolean sit_scheduler_enabled (void);
+void     sit_scheduler_spawn  (SitJobClass  qos,
+                               GFunc        func,
+                               gpointer     object);
 
 G_END_DECLS

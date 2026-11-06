@@ -157,17 +157,6 @@ gdk_deferred_texture_init (GdkDeferredTexture *self)
   g_cond_init (&self->cond);
 }
 
-static gboolean
-deferral_enabled (void)
-{
-  static int enabled = -1;
-
-  if (g_atomic_int_get (&enabled) < 0)
-    g_atomic_int_set (&enabled, g_strcmp0 (g_getenv ("SIT_ASYNC"), "off") != 0);
-
-  return g_atomic_int_get (&enabled);
-}
-
 GdkTexture *
 gdk_deferred_texture_try_new (GBytes *bytes)
 {
@@ -178,7 +167,7 @@ gdk_deferred_texture_try_new (GBytes *bytes)
   Loader loader;
   DecodeJob *job;
 
-  if (!deferral_enabled () ||
+  if (!sit_scheduler_enabled () ||
       g_bytes_get_size (bytes) < MIN_DEFERRED_BYTES ||
       !g_main_context_is_owner (g_main_context_default ()))
     return NULL;

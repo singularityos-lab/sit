@@ -273,3 +273,54 @@ sit_scheduler_settle (void)
     ;
   g_source_set_ready_time (drain_source, -1);
 }
+
+gboolean
+sit_scheduler_enabled (void)
+{
+  static int enabled = -1;
+
+  if (g_atomic_int_get (&enabled) < 0)
+    g_atomic_int_set (&enabled, g_strcmp0 (g_getenv ("SIT_ASYNC"), "off") != 0);
+
+  return g_atomic_int_get (&enabled);
+}
+
+typedef struct
+{
+  SitJob job;
+  GFunc func;
+  gpointer object;
+} SpawnJob;
+
+static void
+spawn_run (SitJob *job)
+{
+  SpawnJob *self = (SpawnJob *) job;
+
+  self->func (self->object, NULL);
+  sit_scheduler_post (job);
+}
+
+static void
+spawn_deliver (SitJob *job)
+{
+  SpawnJob *self = (SpawnJob *) job;
+
+  g_object_unref (self->object);
+  g_free (self);
+}
+
+void
+sit_scheduler_spawn (SitJobClass  qos,
+                     GFunc        func,
+                     gpointer     object)
+{
+  SpawnJob *self = g_new0 (SpawnJob, 1);
+
+  self->job.qos = qos;
+  self->job.run = spawn_run;
+  self->job.deliver = spawn_deliver;
+  self->func = func;
+  self->object = g_object_ref (object);
+  sit_scheduler_submit (&self->job);
+}

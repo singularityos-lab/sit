@@ -55,6 +55,7 @@
 #include "gdktextureutilsprivate.h"
 #include "gdk/gdktextureprivate.h"
 #include "gdk/gdkprofilerprivate.h"
+#include "gdk/sitschedulerprivate.h"
 
 #define GDK_ARRAY_ELEMENT_TYPE char *
 #define GDK_ARRAY_NULL_TERMINATED 1
@@ -793,9 +794,26 @@ load_theme_thread  (GTask        *task,
 }
 
 static void
+load_theme_job (gpointer object,
+                gpointer unused)
+{
+  GtkIconTheme *self = object;
+
+  gtk_icon_theme_lock (self);
+  ensure_valid_themes (self);
+  gtk_icon_theme_unlock (self);
+}
+
+static void
 gtk_icon_theme_load_in_thread (GtkIconTheme *self)
 {
   GTask *task;
+
+  if (sit_scheduler_enabled ())
+    {
+      sit_scheduler_spawn (SIT_JOB_USER, load_theme_job, self);
+      return;
+    }
 
   task = g_task_new (self, NULL, NULL, NULL);
   g_task_set_task_data (task, g_object_ref (self), g_object_unref);
@@ -2286,6 +2304,13 @@ choose_icon (GtkIconTheme      *self,
 }
 
 static void
+load_icon_job (gpointer object,
+               gpointer unused)
+{
+  gtk_icon_paintable_load_in_thread (object);
+}
+
+static void
 load_icon_thread (GTask        *task,
                   gpointer      source_object,
                   gpointer      task_data,
@@ -2382,7 +2407,11 @@ gtk_icon_theme_lookup_icon (GtkIconTheme       *self,
           has_node = icon->node != NULL;
           g_mutex_unlock (&icon->texture_lock);
 
-          if (!has_node)
+          if (!has_node && sit_scheduler_enabled ())
+            {
+              sit_scheduler_spawn (SIT_JOB_INTERACTIVE, load_icon_job, icon);
+            }
+          else if (!has_node)
             {
               GTask *task = g_task_new (icon, NULL, NULL, NULL);
               g_task_run_in_thread (task, load_icon_thread);
