@@ -30,6 +30,7 @@ tests = [
   { 'name': 'sitmotion' },
   { 'name': 'sitasync' },
   { 'name': 'sitsort' },
+  { 'name': 'sitdirlist' },
   { 'name': 'sitwidget' },
   { 'name': 'sitwindow' },
   {

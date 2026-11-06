@@ -22,6 +22,7 @@
 #include "gtkdirectorylist.h"
 
 #include "gtkprivate.h"
+#include "gdk/sitschedulerprivate.h"
 
 /**
  * GtkDirectoryList:
@@ -74,6 +75,7 @@ struct _QueuedEvent
   GFile *file;
   GFileInfo *info;
   GFileMonitorEvent event;
+  gboolean pending;
 };
 
 static void
@@ -99,7 +101,9 @@ struct _GtkDirectoryList
   GCancellable *cancellable;
   GError *error; /* Error while loading */
   GSequence *items; /* Use GPtrArray or GListStore here? */
+  GHashTable *index;
   GQueue events;
+  struct _LoadJob *job;
 };
 
 struct _GtkDirectoryListClass
@@ -228,9 +232,211 @@ gtk_directory_list_get_property (GObject     *object,
     }
 }
 
+static GFile *
+info_file (GFileInfo *info)
+{
+  return G_FILE (g_file_info_get_attribute_object (info, "standard::file"));
+}
+
+static void
+gtk_directory_list_append (GtkDirectoryList *self,
+                           GFileInfo        *info)
+{
+  GSequenceIter *iter = g_sequence_append (self->items, info);
+
+  g_hash_table_replace (self->index, g_object_ref (info_file (info)), iter);
+}
+
+#define LOAD_FIRST_BATCH 128
+#define LOAD_BATCH 4096
+#define LOAD_FLUSH_US (8 * G_TIME_SPAN_MILLISECOND)
+
+typedef struct _LoadJob
+{
+  SitJob job;
+  GtkDirectoryList *list;
+  GFile *file;
+  char *attributes;
+  GCancellable *cancellable;
+  GMutex lock;
+  GPtrArray *ready;
+  GError *error;
+  gboolean finished;
+  gboolean posted;
+  gboolean abandoned;
+} LoadJob;
+
+static void
+load_job_free (LoadJob *job)
+{
+  g_object_unref (job->file);
+  g_free (job->attributes);
+  g_object_unref (job->cancellable);
+  g_ptr_array_unref (job->ready);
+  g_clear_error (&job->error);
+  g_mutex_clear (&job->lock);
+  g_free (job);
+}
+
+static void
+load_job_flush (LoadJob   *job,
+                GPtrArray *batch,
+                gboolean   finished,
+                GError    *error)
+{
+  gboolean post;
+
+  g_mutex_lock (&job->lock);
+  if (batch)
+    {
+      for (guint i = 0; i < batch->len; i++)
+        g_ptr_array_add (job->ready, g_ptr_array_index (batch, i));
+      g_ptr_array_set_size (batch, 0);
+    }
+  if (finished)
+    {
+      job->finished = TRUE;
+      job->error = error;
+    }
+  post = !job->posted;
+  job->posted = TRUE;
+  g_mutex_unlock (&job->lock);
+
+  if (post)
+    sit_scheduler_post (&job->job);
+}
+
+static void
+load_job_run (SitJob *sit_job)
+{
+  LoadJob *job = (LoadJob *) sit_job;
+  GFileEnumerator *enumerator;
+  GError *error = NULL;
+  GPtrArray *batch;
+  guint limit = LOAD_FIRST_BATCH;
+  gint64 last_flush;
+
+  enumerator = g_file_enumerate_children (job->file, job->attributes, G_FILE_QUERY_INFO_NONE,
+                                          job->cancellable, &error);
+  if (enumerator == NULL)
+    {
+      load_job_flush (job, NULL, TRUE, error);
+      return;
+    }
+
+  batch = g_ptr_array_new ();
+  last_flush = g_get_monotonic_time ();
+  for (;;)
+    {
+      GFileInfo *info = g_file_enumerator_next_file (enumerator, job->cancellable, &error);
+      GFile *child;
+
+      if (info == NULL)
+        break;
+
+      child = g_file_enumerator_get_child (enumerator, info);
+      g_file_info_set_attribute_object (info, "standard::file", G_OBJECT (child));
+      g_object_unref (child);
+      g_ptr_array_add (batch, info);
+
+      if (batch->len >= limit || g_get_monotonic_time () - last_flush >= LOAD_FLUSH_US)
+        {
+          load_job_flush (job, batch, FALSE, NULL);
+          limit = LOAD_BATCH;
+          last_flush = g_get_monotonic_time ();
+        }
+    }
+
+  g_file_enumerator_close (enumerator, NULL, NULL);
+  g_object_unref (enumerator);
+  load_job_flush (job, batch, TRUE, error);
+  g_ptr_array_unref (batch);
+}
+
+static void
+load_job_deliver (SitJob *sit_job)
+{
+  LoadJob *job = (LoadJob *) sit_job;
+  GtkDirectoryList *self = job->list;
+  GPtrArray *items;
+  gboolean finished;
+  GError *error;
+  guint position;
+
+  g_mutex_lock (&job->lock);
+  items = job->ready;
+  job->ready = g_ptr_array_new_with_free_func (g_object_unref);
+  finished = job->finished;
+  error = g_steal_pointer (&job->error);
+  job->posted = FALSE;
+  g_mutex_unlock (&job->lock);
+
+  if (job->abandoned)
+    {
+      g_ptr_array_unref (items);
+      g_clear_error (&error);
+      if (finished)
+        load_job_free (job);
+      return;
+    }
+
+  position = g_sequence_get_length (self->items);
+  for (guint i = 0; i < items->len; i++)
+    gtk_directory_list_append (self, g_object_ref (g_ptr_array_index (items, i)));
+
+  g_object_freeze_notify (G_OBJECT (self));
+  if (items->len > 0)
+    {
+      g_list_model_items_changed (G_LIST_MODEL (self), position, 0, items->len);
+      g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_N_ITEMS]);
+    }
+  g_ptr_array_unref (items);
+
+  if (finished)
+    {
+      self->job = NULL;
+      g_clear_object (&self->cancellable);
+      g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_LOADING]);
+      if (error && !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        {
+          self->error = g_steal_pointer (&error);
+          g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_ERROR]);
+        }
+      g_clear_error (&error);
+      load_job_free (job);
+    }
+  g_object_thaw_notify (G_OBJECT (self));
+}
+
+static void
+gtk_directory_list_start_job (GtkDirectoryList *self,
+                              const char       *attributes)
+{
+  LoadJob *job = g_new0 (LoadJob, 1);
+
+  job->job.qos = self->io_priority >= G_PRIORITY_LOW ? SIT_JOB_UTILITY : SIT_JOB_USER;
+  job->job.run = load_job_run;
+  job->job.deliver = load_job_deliver;
+  job->list = self;
+  job->file = g_object_ref (self->file);
+  job->attributes = g_strdup (attributes);
+  job->cancellable = g_object_ref (self->cancellable);
+  job->ready = g_ptr_array_new_with_free_func (g_object_unref);
+  g_mutex_init (&job->lock);
+
+  self->job = job;
+  sit_scheduler_submit (&job->job);
+}
+
 static gboolean
 gtk_directory_list_stop_loading (GtkDirectoryList *self)
 {
+  if (self->job)
+    {
+      self->job->abandoned = TRUE;
+      self->job = NULL;
+    }
+
   if (self->cancellable == NULL)
     return FALSE;
 
@@ -265,6 +471,7 @@ gtk_directory_list_dispose (GObject *object)
   g_clear_pointer (&self->attributes, g_free);
 
   g_clear_error (&self->error);
+  g_clear_pointer (&self->index, g_hash_table_unref);
   g_clear_pointer (&self->items, g_sequence_free);
 
   g_queue_foreach (&self->events, (GFunc) free_queued_event, NULL);
@@ -373,6 +580,7 @@ static void
 gtk_directory_list_init (GtkDirectoryList *self)
 {
   self->items = g_sequence_new (g_object_unref);
+  self->index = g_hash_table_new_full (g_file_hash, (GEqualFunc) g_file_equal, g_object_unref, NULL);
   self->io_priority = G_PRIORITY_DEFAULT;
   self->monitored = TRUE;
   g_queue_init (&self->events);
@@ -410,6 +618,7 @@ gtk_directory_list_clear_items (GtkDirectoryList *self)
   n_items = g_sequence_get_length (self->items);
   if (n_items > 0)
     {
+      g_hash_table_remove_all (self->index);
       g_sequence_remove_range (g_sequence_get_begin_iter (self->items),
                                g_sequence_get_end_iter (self->items));
 
@@ -484,7 +693,7 @@ gtk_directory_list_got_files_cb (GObject      *source,
       file = g_file_enumerator_get_child (enumerator, info);
       g_file_info_set_attribute_object (info, "standard::file", G_OBJECT (file));
       g_object_unref (file);
-      g_sequence_append (self->items, info);
+      gtk_directory_list_append (self, info);
       n++;
     }
   g_list_free (files);
@@ -558,6 +767,14 @@ gtk_directory_list_start_loading (GtkDirectoryList *self)
 
   glib_apis_suck = g_strconcat ("standard::name,", self->attributes, NULL);
   self->cancellable = g_cancellable_new ();
+  if (sit_scheduler_enabled ())
+    {
+      gtk_directory_list_start_job (self, glib_apis_suck);
+      g_free (glib_apis_suck);
+      if (!was_loading)
+        g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_LOADING]);
+      return;
+    }
   g_file_enumerate_children_async (self->file,
                                    glib_apis_suck,
                                    G_FILE_QUERY_INFO_NONE,
@@ -572,23 +789,10 @@ gtk_directory_list_start_loading (GtkDirectoryList *self)
 }
 
 static GSequenceIter *
-find_file (GSequence *sequence,
-           GFile     *file)
+find_file (GtkDirectoryList *self,
+           GFile            *file)
 {
-  GSequenceIter *iter;
-
-  for (iter = g_sequence_get_begin_iter (sequence);
-       !g_sequence_iter_is_end (iter);
-       iter = g_sequence_iter_next (iter))
-    {
-      GFileInfo *item = G_FILE_INFO (g_sequence_get (iter));
-      GFile *f = G_FILE (g_file_info_get_attribute_object (item, "standard::file"));
-
-      if (g_file_equal (f, file))
-        return iter;
-    }
-
-  return NULL;
+  return g_hash_table_lookup (self->index, file);
 }
 
 static gboolean
@@ -604,12 +808,14 @@ handle_event (QueuedEvent *event)
     {
     case G_FILE_MONITOR_EVENT_MOVED_IN:
     case G_FILE_MONITOR_EVENT_CREATED:
-      if (!info)
+      if (event->pending)
         return FALSE;
+      if (!info)
+        return TRUE;
 
       g_file_info_set_attribute_object (info, "standard::file", G_OBJECT (file));
 
-      iter = find_file (self->items, file);
+      iter = find_file (self, file);
       if (iter)
         {
           position = g_sequence_iter_get_position (iter);
@@ -619,7 +825,7 @@ handle_event (QueuedEvent *event)
       else
         {
           position = g_sequence_get_length (self->items);
-          g_sequence_append (self->items, g_object_ref (info));
+          gtk_directory_list_append (self, g_object_ref (info));
           g_list_model_items_changed (G_LIST_MODEL (self), position, 0, 1);
           g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_N_ITEMS]);
         }
@@ -627,10 +833,11 @@ handle_event (QueuedEvent *event)
 
     case G_FILE_MONITOR_EVENT_MOVED_OUT:
     case G_FILE_MONITOR_EVENT_DELETED:
-      iter = find_file (self->items, file);
+      iter = find_file (self, file);
       if (iter)
         {
           position = g_sequence_iter_get_position (iter);
+          g_hash_table_remove (self->index, file);
           g_sequence_remove (iter);
           g_list_model_items_changed (G_LIST_MODEL (self), position, 1, 0);
           g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_N_ITEMS]);
@@ -638,12 +845,14 @@ handle_event (QueuedEvent *event)
       break;
 
     case G_FILE_MONITOR_EVENT_ATTRIBUTE_CHANGED:
-      if (!info)
+      if (event->pending)
         return FALSE;
+      if (!info)
+        return TRUE;
 
       g_file_info_set_attribute_object (info, "standard::file", G_OBJECT (file));
 
-      iter = find_file (self->items, file);
+      iter = find_file (self, file);
       if (iter)
         {
           position = g_sequence_iter_get_position (iter);
@@ -689,6 +898,7 @@ got_new_file_info_cb (GObject      *source,
   GFile *file = event->file;
 
   event->info = g_file_query_info_finish (file, res, NULL);
+  event->pending = FALSE;
   handle_events (self);
 }
 
@@ -702,6 +912,7 @@ got_existing_file_info_cb (GObject      *source,
   GFile *file = event->file;
 
   event->info = g_file_query_info_finish (file, res, NULL);
+  event->pending = FALSE;
   handle_events (self);
 }
 
@@ -723,6 +934,7 @@ directory_changed (GFileMonitor       *monitor,
       ev->list = self;
       ev->event = event;
       ev->file = g_object_ref (file);
+      ev->pending = TRUE;
       g_queue_push_head (&self->events, ev);
 
       g_file_query_info_async (file,
@@ -750,6 +962,7 @@ directory_changed (GFileMonitor       *monitor,
       ev->list = self;
       ev->event = event;
       ev->file = g_object_ref (file);
+      ev->pending = TRUE;
       g_queue_push_head (&self->events, ev);
 
       g_file_query_info_async (file,
@@ -772,6 +985,7 @@ directory_changed (GFileMonitor       *monitor,
       ev->list = self;
       ev->event = G_FILE_MONITOR_EVENT_CREATED;
       ev->file = g_object_ref (other_file);
+      ev->pending = TRUE;
       g_queue_push_head (&self->events, ev);
 
       g_file_query_info_async (other_file,
