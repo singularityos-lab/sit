@@ -6,6 +6,8 @@
 
 #ifdef __linux__
 #include <sched.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 #define FOREGROUND 0
@@ -187,6 +189,10 @@ worker_main (gpointer data)
 
       sched_setscheduler (0, SCHED_IDLE, &param);
     }
+#endif
+#ifdef SYS_ioprio_set
+  if (kind == BACKGROUND)
+    syscall (SYS_ioprio_set, 1, 0, 3 << 13);
 #endif
 
   g_mutex_lock (&scheduler.lock);
