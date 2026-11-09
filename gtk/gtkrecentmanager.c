@@ -80,6 +80,7 @@
 
 #include "config.h"
 
+#include "gdk/sitschedulerprivate.h"
 #include <sys/types.h>
 #include <sys/stat.h>
 #ifdef HAVE_UNISTD_H
@@ -166,6 +167,9 @@ struct _GtkRecentManagerPrivate
 
   guint changed_timeout;
   guint changed_age;
+
+  gpointer load;
+  guint reloaded : 1;
 };
 
 enum
@@ -208,6 +212,10 @@ static void     gtk_recent_manager_enabled_changed     (GtkRecentManager  *manag
 
 
 static void     build_recent_items_list                (GtkRecentManager  *manager);
+static void     recent_items_ready                     (GtkRecentManager  *manager);
+static void     recent_load_abandon                    (GtkRecentManager  *manager);
+static void     recent_load_announce                   (GtkRecentManager  *manager);
+static gboolean recent_items_save                      (GtkRecentManager  *manager);
 static void     purge_recent_items_list                (GtkRecentManager  *manager,
                                                         GError           **error);
 
@@ -319,6 +327,7 @@ gtk_recent_manager_init (GtkRecentManager *manager)
 
   manager->priv = gtk_recent_manager_get_instance_private (manager);
   priv = manager->priv;
+  recent_items_ready (manager);
 
   priv->size = 0;
   priv->filename = NULL;
@@ -362,6 +371,7 @@ gtk_recent_manager_get_property (GObject    *object,
       g_value_set_string (value, recent_manager->priv->filename);
       break;
     case PROP_SIZE:
+      recent_items_ready (recent_manager);
       g_value_set_int (value, recent_manager->priv->size);
       break;
     default:
@@ -389,6 +399,8 @@ gtk_recent_manager_dispose (GObject *gobject)
 {
   GtkRecentManager *manager = GTK_RECENT_MANAGER (gobject);
   GtkRecentManagerPrivate *priv = manager->priv;
+
+  recent_load_abandon (manager);
 
   if (priv->monitor != NULL)
     {
@@ -428,12 +440,27 @@ gtk_recent_manager_real_changed (GtkRecentManager *manager)
 {
   GtkRecentManagerPrivate *priv = manager->priv;
 
+  if (!priv->is_dirty)
+    {
+      if (priv->reloaded)
+        priv->reloaded = FALSE;
+      else
+        {
+          build_recent_items_list (manager);
+          if (priv->load)
+            {
+              recent_load_announce (manager);
+              g_signal_stop_emission (manager, signal_changed, 0);
+            }
+        }
+      return;
+    }
+
+  recent_items_ready (manager);
   g_object_freeze_notify (G_OBJECT (manager));
 
   if (priv->is_dirty)
     {
-      GError *write_error;
-
       /* we are marked as dirty, so we dump the content of our
        * recently used items list
        */
@@ -479,40 +506,11 @@ gtk_recent_manager_real_changed (GtkRecentManager *manager)
             }
         }
 
-      if (priv->filename != NULL)
-        {
-          write_error = NULL;
-          g_bookmark_file_to_file (priv->recent_items, priv->filename, &write_error);
-          if (write_error)
-            {
-              char *utf8 = g_filename_to_utf8 (priv->filename, -1, NULL, NULL, NULL);
-              g_warning ("Attempting to store changes into '%s', but failed: %s",
-                         utf8 ? utf8 : "(invalid filename)",
-                         write_error->message);
-              g_free (utf8);
-              g_error_free (write_error);
-            }
-
-          if (g_chmod (priv->filename, 0600) < 0)
-            {
-              char *utf8 = g_filename_to_utf8 (priv->filename, -1, NULL, NULL, NULL);
-              g_warning ("Attempting to set the permissions of '%s', but failed: %s",
-                         utf8 ? utf8 : "(invalid filename)",
-                         g_strerror (errno));
-              g_free (utf8);
-            }
-        }
+      if (priv->filename != NULL && recent_items_save (manager))
+        g_signal_stop_emission (manager, signal_changed, 0);
 
       /* mark us as clean */
       priv->is_dirty = FALSE;
-    }
-  else
-    {
-      /* we are not marked as dirty, so we have been called
-       * because the recently used resources file has been
-       * changed (and not from us).
-       */
-      build_recent_items_list (manager);
     }
 
   g_object_thaw_notify (G_OBJECT (manager));
@@ -580,6 +578,7 @@ gtk_recent_manager_set_filename (GtkRecentManager *manager,
   g_assert (GTK_IS_RECENT_MANAGER (manager));
 
   priv = manager->priv;
+  recent_items_ready (manager);
 
   /* if a filename is already set and filename is not NULL, then copy
    * it and reset the monitor; otherwise, if it's NULL we're being
@@ -647,12 +646,282 @@ gtk_recent_manager_set_filename (GtkRecentManager *manager,
  * RecentInfo object only on user’s demand to avoid useless replication.
  * this function resets the dirty bit of the manager.
  */
+enum {
+  LOAD_QUEUED,
+  LOAD_RUNNING,
+  LOAD_DONE
+};
+
+typedef struct
+{
+  SitJob job;
+  GtkRecentManager *manager;
+  char *filename;
+  GBookmarkFile *items;
+  GError *error;
+  int state;
+  gboolean abandoned;
+  gboolean announce;
+  GMutex lock;
+  GCond cond;
+} RecentLoad;
+
+static void
+recent_load_free (RecentLoad *load)
+{
+  g_object_unref (load->manager);
+  g_free (load->filename);
+  g_clear_pointer (&load->items, g_bookmark_file_free);
+  g_clear_error (&load->error);
+  g_mutex_clear (&load->lock);
+  g_cond_clear (&load->cond);
+  g_free (load);
+}
+
+static void
+recent_load_read (RecentLoad *load)
+{
+  GBookmarkFile *items = g_bookmark_file_new ();
+  GError *error = NULL;
+
+  if (!g_bookmark_file_load_from_file (items, load->filename, &error))
+    g_clear_pointer (&items, g_bookmark_file_free);
+
+  g_mutex_lock (&load->lock);
+  load->items = items;
+  load->error = error;
+  g_atomic_int_set (&load->state, LOAD_DONE);
+  g_cond_broadcast (&load->cond);
+  g_mutex_unlock (&load->lock);
+}
+
+static void
+recent_load_apply (GtkRecentManager *manager,
+                   RecentLoad       *load)
+{
+  GtkRecentManagerPrivate *priv = manager->priv;
+  int size;
+
+  priv->load = NULL;
+  load->abandoned = TRUE;
+
+  if (load->error)
+    {
+      /* if the file does not exist we just wait for the first write
+       * operation on this recent manager instance, to avoid creating
+       * empty files and leading to spurious file system events
+       */
+      if (load->error->domain == G_FILE_ERROR &&
+          load->error->code != G_FILE_ERROR_NOENT)
+        {
+          char *utf8 = g_filename_to_utf8 (load->filename, -1, NULL, NULL, NULL);
+          g_warning ("Attempting to read the recently used resources "
+                     "file at '%s', but the parser failed: %s.",
+                     utf8 ? utf8 : "(invalid filename)",
+                     load->error->message);
+          g_free (utf8);
+        }
+      g_clear_pointer (&priv->recent_items, g_bookmark_file_free);
+    }
+  else
+    {
+      g_clear_pointer (&priv->recent_items, g_bookmark_file_free);
+      priv->recent_items = g_steal_pointer (&load->items);
+      size = g_bookmark_file_get_size (priv->recent_items);
+      if (priv->size != size)
+        {
+          priv->size = size;
+          g_object_notify (G_OBJECT (manager), "size");
+        }
+    }
+}
+
+static void
+recent_load_run (SitJob *job)
+{
+  RecentLoad *load = (RecentLoad *) job;
+
+  if (g_atomic_int_compare_and_exchange (&load->state, LOAD_QUEUED, LOAD_RUNNING))
+    recent_load_read (load);
+
+  sit_scheduler_post (job);
+}
+
+static void
+recent_load_deliver (SitJob *job)
+{
+  RecentLoad *load = (RecentLoad *) job;
+  GtkRecentManager *manager = load->manager;
+
+  if (!load->abandoned && manager->priv->load == load)
+    {
+      recent_load_apply (manager, load);
+      if (load->announce)
+        {
+          manager->priv->reloaded = TRUE;
+          g_signal_emit (manager, signal_changed, 0);
+          manager->priv->reloaded = FALSE;
+        }
+    }
+
+  recent_load_free (load);
+}
+
+static void
+recent_items_ready (GtkRecentManager *manager)
+{
+  RecentLoad *load = manager->priv->load;
+
+  if (load == NULL)
+    return;
+
+  if (g_atomic_int_compare_and_exchange (&load->state, LOAD_QUEUED, LOAD_RUNNING))
+    recent_load_read (load);
+
+  g_mutex_lock (&load->lock);
+  while (g_atomic_int_get (&load->state) != LOAD_DONE)
+    g_cond_wait (&load->cond, &load->lock);
+  g_mutex_unlock (&load->lock);
+
+  recent_load_apply (manager, load);
+}
+
+static void
+recent_load_announce (GtkRecentManager *manager)
+{
+  RecentLoad *load = manager->priv->load;
+
+  load->announce = TRUE;
+}
+
+static void
+recent_load_abandon (GtkRecentManager *manager)
+{
+  RecentLoad *load = manager->priv->load;
+
+  if (load == NULL)
+    return;
+
+  manager->priv->load = NULL;
+  load->abandoned = TRUE;
+}
+
+typedef struct
+{
+  SitJob job;
+  GtkRecentManager *manager;
+  char *filename;
+  char *data;
+  gsize length;
+  guint64 serial;
+} RecentSave;
+
+static GMutex save_lock;
+static GCond save_cond;
+static guint64 save_serial;
+static guint64 saved_serial;
+static guint saves_pending;
+
+static void
+recent_saves_wait (void)
+{
+  gint64 deadline = g_get_monotonic_time () + 2 * G_TIME_SPAN_SECOND;
+
+  g_mutex_lock (&save_lock);
+  while (saves_pending > 0 && g_cond_wait_until (&save_cond, &save_lock, deadline))
+    ;
+  g_mutex_unlock (&save_lock);
+}
+
+static void
+recent_save_write (RecentSave *save)
+{
+  GError *error = NULL;
+
+  g_mutex_lock (&save_lock);
+  if (save->serial > saved_serial)
+    {
+      saved_serial = save->serial;
+      if (!g_file_set_contents_full (save->filename, save->data, save->length,
+                                     G_FILE_SET_CONTENTS_CONSISTENT, 0600, &error))
+        {
+          char *utf8 = g_filename_to_utf8 (save->filename, -1, NULL, NULL, NULL);
+          g_warning ("Attempting to store changes into '%s', but failed: %s",
+                     utf8 ? utf8 : "(invalid filename)",
+                     error->message);
+          g_free (utf8);
+          g_error_free (error);
+        }
+    }
+  saves_pending--;
+  g_cond_broadcast (&save_cond);
+  g_mutex_unlock (&save_lock);
+}
+
+static void
+recent_save_run (SitJob *job)
+{
+  recent_save_write ((RecentSave *) job);
+  sit_scheduler_post (job);
+}
+
+static void
+recent_save_deliver (SitJob *job)
+{
+  RecentSave *save = (RecentSave *) job;
+
+  if (save->manager)
+    {
+      save->manager->priv->reloaded = TRUE;
+      g_signal_emit (save->manager, signal_changed, 0);
+      save->manager->priv->reloaded = FALSE;
+      g_object_unref (save->manager);
+    }
+  g_free (save->filename);
+  g_free (save->data);
+  g_free (save);
+}
+
+static gboolean
+recent_items_save (GtkRecentManager *manager)
+{
+  GtkRecentManagerPrivate *priv = manager->priv;
+  RecentSave *save = g_new0 (RecentSave, 1);
+
+  save->filename = g_strdup (priv->filename);
+  save->data = g_bookmark_file_to_data (priv->recent_items, &save->length, NULL);
+  g_mutex_lock (&save_lock);
+  save->serial = ++save_serial;
+  saves_pending++;
+  if (save->serial == 1)
+    atexit (recent_saves_wait);
+  g_mutex_unlock (&save_lock);
+
+  if (!sit_scheduler_enabled ())
+    {
+      recent_save_write (save);
+      recent_save_deliver (&save->job);
+      return FALSE;
+    }
+
+  save->manager = g_object_ref (manager);
+  save->job.qos = SIT_JOB_UTILITY;
+  save->job.run = recent_save_run;
+  save->job.deliver = recent_save_deliver;
+  sit_scheduler_submit (&save->job);
+
+  return TRUE;
+}
+
+/* reads the recently used resources file on a worker thread; anything
+ * that needs the items before it is done waits for it */
 static void
 build_recent_items_list (GtkRecentManager *manager)
 {
   GtkRecentManagerPrivate *priv = manager->priv;
-  GError *read_error;
-  int size;
+  RecentLoad *load;
+
+  recent_load_abandon (manager);
 
   if (!priv->recent_items)
     {
@@ -660,50 +929,29 @@ build_recent_items_list (GtkRecentManager *manager)
       priv->size = 0;
     }
 
-  if (priv->filename != NULL)
+  priv->is_dirty = FALSE;
+  if (priv->filename == NULL)
+    return;
+
+  load = g_new0 (RecentLoad, 1);
+  load->manager = g_object_ref (manager);
+  load->filename = g_strdup (priv->filename);
+  load->state = LOAD_QUEUED;
+  g_mutex_init (&load->lock);
+  g_cond_init (&load->cond);
+  priv->load = load;
+
+  if (!sit_scheduler_enabled ())
     {
-      /* the file exists, and it's valid (we hope); if not, destroy the container
-       * object and hope for a better result when the next "changed" signal is
-       * fired.
-       */
-      read_error = NULL;
-      g_bookmark_file_load_from_file (priv->recent_items, priv->filename, &read_error);
-      if (read_error)
-        {
-          /* if the file does not exist we just wait for the first write
-           * operation on this recent manager instance, to avoid creating
-           * empty files and leading to spurious file system events (Sabayon
-           * will not be happy about those)
-           */
-          if (read_error->domain == G_FILE_ERROR &&
-              read_error->code != G_FILE_ERROR_NOENT)
-            {
-              char *utf8 = g_filename_to_utf8 (priv->filename, -1, NULL, NULL, NULL);
-              g_warning ("Attempting to read the recently used resources "
-                         "file at '%s', but the parser failed: %s.",
-                         utf8 ? utf8 : "(invalid filename)",
-                         read_error->message);
-              g_free (utf8);
-            }
-
-          g_bookmark_file_free (priv->recent_items);
-          priv->recent_items = NULL;
-
-          g_error_free (read_error);
-        }
-      else
-        {
-          size = g_bookmark_file_get_size (priv->recent_items);
-          if (priv->size != size)
-            {
-              priv->size = size;
-
-              g_object_notify (G_OBJECT (manager), "size");
-            }
-        }
+      recent_items_ready (manager);
+      recent_load_free (load);
+      return;
     }
 
-  priv->is_dirty = FALSE;
+  load->job.qos = SIT_JOB_USER;
+  load->job.run = recent_load_run;
+  load->job.deliver = recent_load_deliver;
+  sit_scheduler_submit (&load->job);
 }
 
 
@@ -951,6 +1199,7 @@ gtk_recent_manager_add_full (GtkRecentManager    *manager,
     return TRUE;
 
   priv = manager->priv;
+  recent_items_ready (manager);
 
   if (!priv->recent_items)
     {
@@ -1019,6 +1268,7 @@ gtk_recent_manager_remove_item (GtkRecentManager  *manager,
   g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   priv = manager->priv;
+  recent_items_ready (manager);
 
   if (!priv->recent_items)
     {
@@ -1072,6 +1322,7 @@ gtk_recent_manager_has_item (GtkRecentManager *manager,
   g_return_val_if_fail (uri != NULL, FALSE);
 
   priv = manager->priv;
+  recent_items_ready (manager);
   g_return_val_if_fail (priv->recent_items != NULL, FALSE);
 
   return g_bookmark_file_has_item (priv->recent_items, uri);
@@ -1171,6 +1422,7 @@ gtk_recent_manager_lookup_item (GtkRecentManager  *manager,
   g_return_val_if_fail (error == NULL || *error == NULL, NULL);
 
   priv = manager->priv;
+  recent_items_ready (manager);
   if (!priv->recent_items)
     {
       priv->recent_items = g_bookmark_file_new ();
@@ -1233,6 +1485,7 @@ gtk_recent_manager_move_item (GtkRecentManager  *recent_manager,
   g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
 
   priv = recent_manager->priv;
+  recent_items_ready (recent_manager);
 
   if (!priv->recent_items)
     {
@@ -1295,6 +1548,7 @@ gtk_recent_manager_get_items (GtkRecentManager *manager)
   g_return_val_if_fail (GTK_IS_RECENT_MANAGER (manager), NULL);
 
   priv = manager->priv;
+  recent_items_ready (manager);
   if (!priv->recent_items)
     return NULL;
 
@@ -1352,6 +1606,7 @@ gtk_recent_manager_purge_items (GtkRecentManager  *manager,
   g_return_val_if_fail (GTK_IS_RECENT_MANAGER (manager), -1);
 
   priv = manager->priv;
+  recent_items_ready (manager);
   if (!priv->recent_items)
     return 0;
 
