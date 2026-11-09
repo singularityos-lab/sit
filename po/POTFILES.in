@@ -337,6 +337,7 @@ gtk/gtkstyleprovider.c
 gtk/gtkswitch.c
 gtk/gtktextbuffer.c
 gtk/gtktext.c
+gtk/sitotp.c
 gtk/gtktextchild.c
 gtk/gtktextencoding.c
 gtk/gtktexthandle.c

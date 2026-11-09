@@ -8991,6 +8991,41 @@ msgstr ""
 "theme-index.\n"
 
 #, c-format
+#: gtk/sitotp.c
+#, c-format
+msgid "Paste Code %s from %s, Meant for %s"
+msgstr "Incolla codice %s da %s, destinato a %s"
+
+#: gtk/sitotp.c
+#, c-format
+msgid "Paste Code %s from %s, Meant for Another App"
+msgstr "Incolla codice %s da %s, destinato a un'altra app"
+
+#: gtk/sitotp.c
+#, c-format
+msgid "Paste Code %s from %s"
+msgstr "Incolla codice %s da %s"
+
+#: gtk/sitotp.c
+#, c-format
+msgid "Paste Code %s"
+msgstr "Incolla codice %s"
+
+#: gtk/sitotp.c
+#, c-format
+msgid "Use Code %s from %s, Meant for %s"
+msgstr "Usa codice %s da %s, destinato a %s"
+
+#: gtk/sitotp.c
+#, c-format
+msgid "Use Code %s from %s, Meant for Another App"
+msgstr "Usa codice %s da %s, destinato a un'altra app"
+
+#: gtk/sitotp.c
+#, c-format
+msgid "Use Code %s from %s"
+msgstr "Usa codice %s da %s"
+
 #~ msgid ""
 #~ "This GLES %d.%d implementation does not support half-float vertex data"
 #~ msgstr "L'implementazione GLES %d.%d non supporta i dati vertex half-float"

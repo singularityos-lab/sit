@@ -66,6 +66,7 @@
 #include "gtktooltip.h"
 #include "gtktypebuiltins.h"
 #include "gtkwidgetprivate.h"
+#include "sitotpprivate.h"
 #include "gtkwindow.h"
 
 #include "deprecated/gtkrender.h"
@@ -243,6 +244,7 @@ struct _GtkTextPrivate
 
   GtkWidget     *popup_menu;
   GMenuModel    *extra_menu;
+  GMenu         *otp_section;
 
   GtkTextHistory *history;
 
@@ -456,6 +458,8 @@ static void        gtk_text_set_enable_undo      (GtkText    *self,
 /* Default signal handlers
  */
 static GMenuModel *gtk_text_get_menu_model  (GtkText         *self);
+static void gtk_text_update_otp_section (GtkText *self);
+static void gtk_text_activate_misc_paste_code (GtkWidget *widget, const char *action_name, GVariant *parameter);
 static void     gtk_text_popup_menu         (GtkWidget       *widget,
                                              const char      *action_name,
                                              GVariant        *parameters);
@@ -1358,6 +1362,9 @@ gtk_text_class_init (GtkTextClass *class)
   gtk_widget_class_install_action (widget_class, "misc.toggle-direction", NULL,
                                    gtk_text_activate_misc_toggle_direction);
 
+  gtk_widget_class_install_action (widget_class, "misc.paste-code", NULL,
+                                   gtk_text_activate_misc_paste_code);
+
   /**
    * GtkText|misc.toggle-visibility:
    *
@@ -2185,6 +2192,8 @@ gtk_text_dispose (GObject *object)
 
   g_clear_pointer (&priv->selection_bubble, gtk_widget_unparent);
   g_clear_pointer (&priv->popup_menu, gtk_widget_unparent);
+  g_clear_object (&priv->otp_section);
+  sit_otp_detach (GTK_WIDGET (self));
   g_clear_pointer ((GtkWidget **) &priv->text_handles[TEXT_HANDLE_CURSOR], gtk_widget_unparent);
   g_clear_pointer ((GtkWidget **) &priv->text_handles[TEXT_HANDLE_SELECTION_BOUND], gtk_widget_unparent);
   g_clear_object (&priv->extra_menu);
@@ -2874,6 +2883,7 @@ gtk_text_do_popup (GtkText *self,
 
   gtk_text_update_clipboard_actions (self);
   gtk_text_update_emoji_action (self);
+  gtk_text_update_otp_section (self);
 
   if (!priv->popup_menu)
     {
@@ -3458,9 +3468,12 @@ gtk_text_focus_changed (GtkEventControllerFocus *controller,
       gtk_text_reset_blink_time (self);
       gtk_text_check_cursor_blink (self);
       gtk_text_update_primary_selection (self);
+      if (priv->editable)
+        sit_otp_focus_in (widget);
     }
   else /* Focus out */
     {
+      sit_otp_focus_out (widget);
       gtk_text_selection_bubble_popup_unset (self);
 
       priv->text_handles_enabled = FALSE;
@@ -6363,6 +6376,47 @@ gtk_text_update_clear_action (GtkText *self)
   gtk_widget_action_set_enabled (GTK_WIDGET (self), "text.clear", priv->editable);
 }
 
+static void
+gtk_text_update_otp_section (GtkText *self)
+{
+  GtkTextPrivate *priv = gtk_text_get_instance_private (self);
+  SitOtpCode code = { 0 };
+  gboolean have;
+
+  have = priv->editable && sit_otp_current (&code);
+  gtk_widget_action_set_enabled (GTK_WIDGET (self), "misc.paste-code", have);
+  if (!priv->otp_section)
+    priv->otp_section = g_menu_new ();
+  g_menu_remove_all (priv->otp_section);
+  if (have)
+    {
+      char *label = sit_otp_menu_label (&code);
+      GMenuItem *item = g_menu_item_new (label, "misc.paste-code");
+      g_menu_item_set_attribute (item, "touch-icon", "s", "dialog-password-symbolic");
+      g_menu_append_item (priv->otp_section, item);
+      g_object_unref (item);
+      g_free (label);
+    }
+  sit_otp_code_clear (&code);
+}
+
+static void
+gtk_text_activate_misc_paste_code (GtkWidget  *widget,
+                                   const char *action_name,
+                                   GVariant   *parameter)
+{
+  GtkText *self = GTK_TEXT (widget);
+  GtkTextPrivate *priv = gtk_text_get_instance_private (self);
+  SitOtpCode code = { 0 };
+
+  if (!priv->editable || !sit_otp_current (&code))
+    return;
+  begin_change (self);
+  sit_otp_fill (widget, &code);
+  end_change (self);
+  sit_otp_code_clear (&code);
+}
+
 static GMenuModel *
 gtk_text_get_menu_model (GtkText *self)
 {
@@ -6372,6 +6426,14 @@ gtk_text_get_menu_model (GtkText *self)
   GMenuItem *item;
 
   joined = gtk_joined_menu_new ();
+
+  if (!priv->otp_section)
+    priv->otp_section = g_menu_new ();
+  menu = g_menu_new ();
+  g_menu_append_section (menu, NULL, G_MENU_MODEL (priv->otp_section));
+  gtk_joined_menu_append_menu (joined, G_MENU_MODEL (menu));
+  g_object_unref (menu);
+
   menu = g_menu_new ();
 
   section = g_menu_new ();

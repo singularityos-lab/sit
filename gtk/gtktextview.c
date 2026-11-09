@@ -61,6 +61,7 @@
 #include "gtktextutilprivate.h"
 #include "gtktypebuiltins.h"
 #include "gtkwidgetprivate.h"
+#include "sitotpprivate.h"
 #include "gtkwindow.h"
 
 /**
@@ -284,6 +285,7 @@ struct _GtkTextViewPrivate
   GtkIMContext *im_context;
   GtkWidget *popup_menu;
   GMenuModel *extra_menu;
+  GMenu *otp_section;
 
   GtkTextPendingScroll *pending_scroll;
 
@@ -503,6 +505,7 @@ static gboolean gtk_text_view_drag_drop          (GtkDropTarget    *dest,
                                                   double            y,
                                                   GtkTextView      *text_view);
 
+static void gtk_text_view_activate_misc_paste_code (GtkWidget *widget, const char *action_name, GVariant *parameter);
 static void gtk_text_view_popup_menu        (GtkWidget  *widget,
                                              const char *action_name,
                                              GVariant   *parameters);
@@ -1654,6 +1657,9 @@ gtk_text_view_class_init (GtkTextViewClass *klass)
 
   gtk_widget_class_install_action (widget_class, "text.clear", NULL,
                                    gtk_text_view_clear);
+
+  gtk_widget_class_install_action (widget_class, "misc.paste-code", NULL,
+                                   gtk_text_view_activate_misc_paste_code);
 
   /**
    * GtkTextView|text.undo:
@@ -4247,6 +4253,7 @@ gtk_text_view_finalize (GObject *object)
 
   g_clear_pointer (&priv->popup_menu, gtk_widget_unparent);
   g_clear_object (&priv->extra_menu);
+  g_clear_object (&priv->otp_section);
 
   G_OBJECT_CLASS (gtk_text_view_parent_class)->finalize (object);
 }
@@ -9362,6 +9369,50 @@ gtk_text_view_update_clear_action (GtkTextView *text_view)
   gtk_widget_action_set_enabled (GTK_WIDGET (text_view), "text.clear", text_view->priv->editable);
 }
 
+static void
+gtk_text_view_update_otp_section (GtkTextView *text_view)
+{
+  GtkTextViewPrivate *priv = text_view->priv;
+  SitOtpCode code = { 0 };
+  gboolean have;
+
+  have = priv->editable && sit_otp_current (&code);
+  gtk_widget_action_set_enabled (GTK_WIDGET (text_view), "misc.paste-code", have);
+  if (!priv->otp_section)
+    priv->otp_section = g_menu_new ();
+  g_menu_remove_all (priv->otp_section);
+  if (have)
+    {
+      char *label = sit_otp_menu_label (&code);
+      GMenuItem *item = g_menu_item_new (label, "misc.paste-code");
+      g_menu_item_set_attribute (item, "touch-icon", "s", "dialog-password-symbolic");
+      g_menu_append_item (priv->otp_section, item);
+      g_object_unref (item);
+      g_free (label);
+    }
+  sit_otp_code_clear (&code);
+}
+
+static void
+gtk_text_view_activate_misc_paste_code (GtkWidget  *widget,
+                                        const char *action_name,
+                                        GVariant   *parameter)
+{
+  GtkTextView *text_view = GTK_TEXT_VIEW (widget);
+  GtkTextBuffer *buffer = get_buffer (text_view);
+  SitOtpCode code = { 0 };
+
+  if (!text_view->priv->editable || !sit_otp_current (&code))
+    return;
+  gtk_text_buffer_begin_user_action (buffer);
+  gtk_text_buffer_delete_selection (buffer, TRUE, text_view->priv->editable);
+  gtk_text_buffer_insert_interactive_at_cursor (buffer, code.code, -1, text_view->priv->editable);
+  gtk_text_buffer_end_user_action (buffer);
+  gtk_text_view_scroll_mark_onscreen (text_view, gtk_text_buffer_get_insert (buffer));
+  sit_otp_mark_used (code.id);
+  sit_otp_code_clear (&code);
+}
+
 static GMenuModel *
 gtk_text_view_get_menu_model (GtkTextView *text_view)
 {
@@ -9371,6 +9422,13 @@ gtk_text_view_get_menu_model (GtkTextView *text_view)
   GMenuItem *item;
 
   joined = gtk_joined_menu_new ();
+
+  if (!priv->otp_section)
+    priv->otp_section = g_menu_new ();
+  menu = g_menu_new ();
+  g_menu_append_section (menu, NULL, G_MENU_MODEL (priv->otp_section));
+  gtk_joined_menu_append_menu (joined, G_MENU_MODEL (menu));
+  g_object_unref (menu);
 
   menu = g_menu_new ();
 
@@ -9440,6 +9498,7 @@ gtk_text_view_do_popup (GtkTextView *text_view,
     return;
 
   gtk_text_view_update_clipboard_actions (text_view);
+  gtk_text_view_update_otp_section (text_view);
 
   if (!priv->popup_menu)
     {
