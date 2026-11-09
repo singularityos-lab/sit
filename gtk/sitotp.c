@@ -377,6 +377,9 @@ sit_otp_focus_in (GtkWidget *text)
   gtk_button_set_label (GTK_BUTTON (button), label);
   g_free (label);
   gtk_popover_popup (GTK_POPOVER (popover));
+  if (otp_bus)
+    g_dbus_connection_call (otp_bus, OTP_BUS_NAME, OTP_PATH, OTP_IFACE, "Present",
+                            NULL, NULL, G_DBUS_CALL_FLAGS_NO_AUTO_START, 2000, NULL, NULL, NULL);
   sit_otp_code_clear (&code);
 }
 
