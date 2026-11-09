@@ -627,6 +627,336 @@ test_throughput (void)
   g_assert_cmpint (delivered, ==, total);
 }
 
+static gpointer
+add_one (gpointer       value,
+         GCancellable  *cancellable,
+         gpointer       data,
+         GError       **error)
+{
+  int *next = g_new (int, 1);
+
+  g_assert_true (g_thread_self () != main_thread);
+  *next = *(int *) value + 1;
+  return next;
+}
+
+static gpointer
+never_called (gpointer       value,
+              GCancellable  *cancellable,
+              gpointer       data,
+              GError       **error)
+{
+  g_assert_not_reached ();
+  return NULL;
+}
+
+static void
+test_future_then (void)
+{
+  SitFuture *first = sit_future_spawn (NULL, SIT_QOS_USER, g_free, square, GINT_TO_POINTER (3), NULL);
+  SitFuture *second = sit_future_then (first, SIT_QOS_UTILITY, g_free, add_one, NULL, NULL);
+  SitFuture *third = sit_future_then (second, SIT_QOS_USER, g_free, add_one, NULL, NULL);
+  SitFuture *broken = sit_future_spawn (NULL, SIT_QOS_USER, NULL, fail, NULL, NULL);
+  SitFuture *after_broken = sit_future_then (broken, SIT_QOS_USER, g_free, never_called, NULL, NULL);
+  SitFuture *slow = sit_future_spawn (NULL, SIT_QOS_UTILITY, NULL, sleepy, NULL, NULL);
+  SitFuture *after_slow = sit_future_then (slow, SIT_QOS_USER, g_free, never_called, NULL, NULL);
+  Outcome chained = { 0 }, failed = { 0 }, cancelled = { 0 }, source = { 0 };
+
+  g_object_unref (first);
+  g_object_unref (second);
+  sit_future_wait (third, NULL, wait_done, &chained);
+  sit_future_wait (after_broken, NULL, wait_done, &failed);
+  sit_future_wait (after_slow, NULL, wait_done, &cancelled);
+  sit_future_wait (slow, NULL, wait_done, &source);
+  sit_future_cancel (after_slow);
+  spin_until (&chained.done);
+  spin_until (&failed.done);
+  spin_until (&cancelled.done);
+  spin_until (&source.done);
+
+  g_assert_no_error (chained.error);
+  g_assert_cmpint (chained.value, ==, 11);
+  g_assert_error (failed.error, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_error (cancelled.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_assert_error (source.error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_clear_error (&failed.error);
+  g_clear_error (&cancelled.error);
+  g_clear_error (&source.error);
+  g_object_unref (third);
+  g_object_unref (broken);
+  g_object_unref (after_broken);
+  g_object_unref (slow);
+  g_object_unref (after_slow);
+}
+
+#define PRODUCERS 3
+#define PER_PRODUCER 2000
+
+static gpointer
+send_numbers (GCancellable  *cancellable,
+         gpointer       data,
+         GError       **error)
+{
+  SitChannel *channel = data;
+  int producer = g_atomic_int_add ((int *) g_object_get_data (G_OBJECT (channel), "counter"), 1);
+  for (int i = 0; i < PER_PRODUCER; i++)
+    {
+      int *item = g_new (int, 1);
+
+      *item = producer * PER_PRODUCER + i;
+      if (!sit_channel_send (channel, item, cancellable))
+        break;
+      g_assert_cmpuint (sit_channel_get_length (channel), <=, 8);
+    }
+  return NULL;
+}
+
+typedef struct
+{
+  gboolean done;
+  int received;
+  int last[PRODUCERS];
+  gboolean in_order;
+} Drain;
+
+static void receive_one (GObject *source, GAsyncResult *result, gpointer data);
+
+static void
+receive_one (GObject      *source,
+             GAsyncResult *result,
+             gpointer      data)
+{
+  Drain *drain = data;
+  GError *error = NULL;
+  int *item = sit_channel_receive_finish (SIT_CHANNEL (source), result, &error);
+
+  g_assert_no_error (error);
+  if (!item)
+    {
+      drain->done = TRUE;
+      return;
+    }
+  if (*item % PER_PRODUCER != drain->last[*item / PER_PRODUCER] + 1)
+    drain->in_order = FALSE;
+  drain->last[*item / PER_PRODUCER] = *item % PER_PRODUCER;
+  drain->received++;
+  g_free (item);
+  sit_channel_receive_async (SIT_CHANNEL (source), NULL, receive_one, drain);
+}
+
+static void
+close_when_sent (GObject      *source,
+                 GAsyncResult *result,
+                 gpointer      data)
+{
+  g_assert_true (sit_future_all_finish (result, NULL));
+  sit_channel_close (SIT_CHANNEL (data));
+}
+
+static gpointer
+sum_items (GCancellable  *cancellable,
+           gpointer       data,
+           GError       **error)
+{
+  int *sum = g_new0 (int, 1);
+  int *item;
+
+  while ((item = sit_channel_receive (data, cancellable, error)))
+    {
+      *sum += *item;
+      g_free (item);
+    }
+  return sum;
+}
+
+static void
+test_channel (void)
+{
+  SitChannel *channel = sit_channel_new (8, g_free);
+  SitChannel *pipe = sit_channel_new (0, g_free);
+  SitFuture *producers[PRODUCERS];
+  SitFuture *consumer;
+  Drain drain = { 0 };
+  Outcome summed = { 0 };
+  int counter = 0;
+  int *spare = g_new (int, 1);
+
+  g_object_set_data (G_OBJECT (channel), "counter", &counter);
+  drain.in_order = TRUE;
+  for (int i = 0; i < PRODUCERS; i++)
+    drain.last[i] = -1;
+  for (int i = 0; i < PRODUCERS; i++)
+    producers[i] = sit_future_spawn (NULL, SIT_QOS_USER, NULL, send_numbers, channel, NULL);
+  sit_future_all (producers, PRODUCERS, NULL, close_when_sent, channel);
+  sit_channel_receive_async (channel, NULL, receive_one, &drain);
+  spin_until (&drain.done);
+  g_assert_cmpint (drain.received, ==, PRODUCERS * PER_PRODUCER);
+  g_assert_true (drain.in_order);
+  *spare = 1;
+  g_assert_false (sit_channel_try_send (channel, spare));
+
+  consumer = sit_future_spawn (NULL, SIT_QOS_USER, g_free, sum_items, pipe, NULL);
+  for (int i = 1; i <= 100; i++)
+    {
+      int *item = g_new (int, 1);
+
+      *item = i;
+      g_assert_true (sit_channel_try_send (pipe, item));
+    }
+  sit_channel_close (pipe);
+  sit_future_wait (consumer, NULL, wait_done, &summed);
+  spin_until (&summed.done);
+  g_assert_no_error (summed.error);
+  g_assert_cmpint (summed.value, ==, 5050);
+
+  g_free (spare);
+  for (int i = 0; i < PRODUCERS; i++)
+    g_object_unref (producers[i]);
+  g_object_unref (consumer);
+  g_object_unref (channel);
+  g_object_unref (pipe);
+}
+
+typedef struct
+{
+  GMutex lock;
+  GHashTable *threads;
+  int finished;
+  int frames_seen;
+} Seen;
+
+static gpointer
+nap (GCancellable  *cancellable,
+     gpointer       data,
+     GError       **error)
+{
+  Seen *seen = data;
+
+  g_mutex_lock (&seen->lock);
+  g_hash_table_add (seen->threads, g_thread_self ());
+  g_mutex_unlock (&seen->lock);
+  g_usleep (20000);
+  g_atomic_int_inc (&seen->finished);
+  g_main_context_wakeup (NULL);
+  return NULL;
+}
+
+#define NAPS 8
+
+static gpointer
+spawn_from_worker (GCancellable  *cancellable,
+                   gpointer       data,
+                   GError       **error)
+{
+  for (int i = 0; i < NAPS; i++)
+    {
+      g_object_unref (sit_future_spawn (NULL, SIT_QOS_USER, NULL, nap, data, NULL));
+    }
+  return NULL;
+}
+
+static void
+test_work_stealing (void)
+{
+  Seen seen = { 0 };
+  SitFuture *outer;
+  gint64 start;
+  double elapsed;
+
+  g_mutex_init (&seen.lock);
+  seen.threads = g_hash_table_new (NULL, NULL);
+  start = g_get_monotonic_time ();
+  outer = sit_future_spawn (NULL, SIT_QOS_USER, NULL, spawn_from_worker, &seen, NULL);
+  while (g_atomic_int_get (&seen.finished) < NAPS)
+    g_main_context_iteration (NULL, TRUE);
+  elapsed = (g_get_monotonic_time () - start) / (double) G_TIME_SPAN_MILLISECOND;
+  g_test_message ("%d naps queued on one core ran on %u threads in %.1f ms",
+                  NAPS, g_hash_table_size (seen.threads), elapsed);
+  if (g_get_num_processors () > 1)
+    {
+      g_assert_cmpuint (g_hash_table_size (seen.threads), >, 1);
+      g_assert_cmpfloat (elapsed, <, NAPS * 20 * 0.75);
+    }
+  g_object_unref (outer);
+  g_mutex_clear (&seen.lock);
+  g_hash_table_unref (seen.threads);
+}
+
+#define FRAME_TASKS 200
+
+typedef struct
+{
+  GdkFrameClock *clock;
+  GHashTable *frames;
+  int delivered;
+  int most_in_frame;
+  gint64 frame;
+  int in_frame;
+} Frames;
+
+static void
+busy_delivery (GObject      *source,
+               GAsyncResult *result,
+               gpointer      data)
+{
+  Frames *frames = data;
+  gint64 counter = gdk_frame_clock_get_frame_counter (frames->clock);
+  gint64 until = g_get_monotonic_time () + 500;
+
+  if (counter != frames->frame)
+    {
+      frames->frame = counter;
+      frames->in_frame = 0;
+    }
+  frames->in_frame++;
+  frames->most_in_frame = MAX (frames->most_in_frame, frames->in_frame);
+  g_hash_table_add (frames->frames, GINT_TO_POINTER ((int) counter));
+  frames->delivered++;
+  while (g_get_monotonic_time () < until)
+    ;
+}
+
+static gboolean
+keep_ticking (GtkWidget     *widget,
+              GdkFrameClock *clock,
+              gpointer       data)
+{
+  return G_SOURCE_CONTINUE;
+}
+
+static void
+test_frame_drain (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  Frames frames = { 0 };
+  gint64 first;
+
+  gtk_window_set_default_size (GTK_WINDOW (window), 200, 200);
+  gtk_window_present (GTK_WINDOW (window));
+  while (!gtk_widget_get_mapped (window))
+    g_main_context_iteration (NULL, TRUE);
+  frames.clock = gtk_widget_get_frame_clock (window);
+  frames.frames = g_hash_table_new (NULL, NULL);
+  frames.frame = -1;
+  gtk_widget_add_tick_callback (window, keep_ticking, NULL, NULL);
+  first = gdk_frame_clock_get_frame_counter (frames.clock);
+  while (gdk_frame_clock_get_frame_counter (frames.clock) < first + 3)
+    g_main_context_iteration (NULL, TRUE);
+
+  for (int i = 0; i < FRAME_TASKS; i++)
+    sit_task_run (NULL, SIT_QOS_USER, NULL, nothing, NULL, NULL, NULL, busy_delivery, &frames);
+  while (frames.delivered < FRAME_TASKS)
+    g_main_context_iteration (NULL, TRUE);
+
+  g_test_message ("%d deliveries of 0.5 ms spread over %u frames, at most %d in one frame",
+                  FRAME_TASKS, g_hash_table_size (frames.frames), frames.most_in_frame);
+  g_assert_cmpuint (g_hash_table_size (frames.frames), >=, 15);
+  g_assert_cmpint (frames.most_in_frame, <=, 10);
+
+  g_hash_table_unref (frames.frames);
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -648,6 +978,10 @@ main (int argc, char *argv[])
   g_test_add_func ("/sit/async/stream-error", test_stream_error);
   g_test_add_func ("/sit/async/stream-threads", test_stream_threads);
   g_test_add_func ("/sit/async/thread-default-context", test_thread_default_context);
+  g_test_add_func ("/sit/async/future-then", test_future_then);
+  g_test_add_func ("/sit/async/channel", test_channel);
+  g_test_add_func ("/sit/async/work-stealing", test_work_stealing);
+  g_test_add_func ("/sit/async/frame-drain", test_frame_drain);
   g_test_add_func ("/sit/async/throughput", test_throughput);
 
   return g_test_run ();

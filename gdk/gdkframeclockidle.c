@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include "gdkframeclockidleprivate.h"
+#include "sitschedulerprivate.h"
 
 #include "gdkdebugprivate.h"
 #include "gdkframeclockprivate.h"
@@ -650,6 +651,7 @@ gdk_frame_clock_paint_idle (void *data)
             {
               priv->requested &= ~GDK_FRAME_CLOCK_PHASE_AFTER_PAINT;
               _gdk_frame_clock_emit_after_paint (clock);
+              sit_scheduler_after_frame ();
               /* the ::after-paint phase doesn't get repeated on freeze/thaw,
                */
               priv->phase = GDK_FRAME_CLOCK_PHASE_NONE;

@@ -177,6 +177,19 @@ GDK_AVAILABLE_IN_ALL
 int sit_future_race_finish (GAsyncResult  *result,
                             GError       **error);
 
+typedef gpointer (* SitThenFunc) (gpointer       value,
+                                  GCancellable  *cancellable,
+                                  gpointer       user_data,
+                                  GError       **error);
+
+GDK_AVAILABLE_IN_ALL
+SitFuture *sit_future_then (SitFuture      *future,
+                            SitQos          qos,
+                            GDestroyNotify  result_destroy,
+                            SitThenFunc     func,
+                            gpointer        func_data,
+                            GDestroyNotify  func_data_destroy);
+
 #define SIT_TYPE_STREAM (sit_stream_get_type ())
 GDK_AVAILABLE_IN_ALL
 G_DECLARE_FINAL_TYPE (SitStream, sit_stream, SIT, STREAM, GObject)
@@ -214,6 +227,45 @@ GDK_AVAILABLE_IN_ALL
 GPtrArray *sit_stream_next_finish (SitStream     *self,
                                    GAsyncResult  *result,
                                    GError       **error);
+
+#define SIT_TYPE_CHANNEL (sit_channel_get_type ())
+GDK_AVAILABLE_IN_ALL
+G_DECLARE_FINAL_TYPE (SitChannel, sit_channel, SIT, CHANNEL, GObject)
+
+GDK_AVAILABLE_IN_ALL
+SitChannel *sit_channel_new (guint          capacity,
+                             GDestroyNotify item_destroy);
+
+GDK_AVAILABLE_IN_ALL
+gboolean sit_channel_send (SitChannel    *self,
+                           gpointer       item,
+                           GCancellable  *cancellable);
+
+GDK_AVAILABLE_IN_ALL
+gboolean sit_channel_try_send (SitChannel *self,
+                               gpointer    item);
+
+GDK_AVAILABLE_IN_ALL
+gpointer sit_channel_receive (SitChannel    *self,
+                              GCancellable  *cancellable,
+                              GError       **error);
+
+GDK_AVAILABLE_IN_ALL
+void sit_channel_receive_async (SitChannel          *self,
+                                GCancellable        *cancellable,
+                                GAsyncReadyCallback  callback,
+                                gpointer             user_data);
+
+GDK_AVAILABLE_IN_ALL
+gpointer sit_channel_receive_finish (SitChannel    *self,
+                                     GAsyncResult  *result,
+                                     GError       **error);
+
+GDK_AVAILABLE_IN_ALL
+void sit_channel_close (SitChannel *self);
+
+GDK_AVAILABLE_IN_ALL
+guint sit_channel_get_length (SitChannel *self);
 
 GDK_AVAILABLE_IN_ALL
 void sit_async_flush (void);

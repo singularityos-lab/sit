@@ -743,6 +743,140 @@ sit_future_timeout (SitFuture *future,
   return self;
 }
 
+typedef struct
+{
+  SitThenFunc func;
+  gpointer func_data;
+  GDestroyNotify func_data_destroy;
+  SitFuture *source;
+} ThenData;
+
+typedef struct
+{
+  SitFuture *self;
+  ThenData *data;
+  SitQos qos;
+} ThenStart;
+
+static void
+then_data_free (gpointer data)
+{
+  ThenData *self = data;
+
+  if (self->func_data_destroy)
+    self->func_data_destroy (self->func_data);
+  g_object_unref (self->source);
+  g_free (self);
+}
+
+static gpointer
+then_run (GCancellable  *cancellable,
+          gpointer       data,
+          GError       **error)
+{
+  ThenData *self = data;
+
+  return self->func (self->source->result, cancellable, self->func_data, error);
+}
+
+static void
+then_submit (SitFuture *self,
+             ThenData  *data,
+             SitQos     qos)
+{
+  TaskSitJob *job = g_new0 (TaskSitJob, 1);
+
+  job->job.qos = (SitJobClass) qos;
+  job->job.run = task_job_run;
+  job->job.deliver = future_job_deliver;
+  job->cancellable = g_object_ref (self->cancellable);
+  job->future = g_object_ref (self);
+  job->func = then_run;
+  job->func_data = data;
+  job->func_data_destroy = then_data_free;
+  job->result_destroy = self->result_destroy;
+
+  sit_scheduler_submit (&job->job);
+}
+
+static void
+then_ready (GObject      *source,
+            GAsyncResult *result,
+            gpointer      data)
+{
+  ThenStart *start = data;
+  SitFuture *self = start->self;
+  GError *error = NULL;
+
+  sit_future_wait_finish (SIT_FUTURE (source), result, &error);
+
+  if (self->done)
+    {
+      g_clear_error (&error);
+      then_data_free (start->data);
+    }
+  else if (error)
+    {
+      future_complete (self, NULL, error);
+      then_data_free (start->data);
+    }
+  else
+    then_submit (self, start->data, start->qos);
+
+  g_object_unref (self);
+  g_free (start);
+}
+
+/**
+ * sit_future_then:
+ * @future: a future
+ * @qos: the class of service of the continuation
+ * @result_destroy: (nullable): frees the result of the continuation
+ * @func: (scope notified) (closure func_data) (destroy func_data_destroy): run on a worker thread with the value of @future
+ * @func_data: data for @func
+ * @func_data_destroy: (nullable): frees @func_data on the main thread
+ *
+ * Errors of @future are passed on without running @func. Cancelling the
+ * returned future also cancels @future.
+ *
+ * Returns: (transfer full): the future of the continuation
+ */
+SitFuture *
+sit_future_then (SitFuture      *future,
+                 SitQos          qos,
+                 GDestroyNotify  result_destroy,
+                 SitThenFunc     func,
+                 gpointer        func_data,
+                 GDestroyNotify  func_data_destroy)
+{
+  SitFuture *self;
+  ThenStart *start;
+
+  g_return_val_if_fail (SIT_IS_FUTURE (future), NULL);
+  g_return_val_if_fail (qos <= SIT_QOS_BACKGROUND, NULL);
+  g_return_val_if_fail (func != NULL, NULL);
+
+  sit_scheduler_init ();
+
+  self = g_object_new (SIT_TYPE_FUTURE, NULL);
+  self->cancellable = link_new (&self->link, NULL, NULL);
+  self->result_destroy = result_destroy;
+  self->inner = g_object_ref (future);
+
+  start = g_new0 (ThenStart, 1);
+  start->self = g_object_ref (self);
+  start->qos = qos;
+  start->data = g_new0 (ThenData, 1);
+  start->data->func = func;
+  start->data->func_data = func_data;
+  start->data->func_data_destroy = func_data_destroy;
+  start->data->source = g_object_ref (future);
+
+  sit_future_wait (future, NULL, then_ready, start);
+
+  return self;
+}
+
 typedef enum {
   COMBINE_ALL,
   COMBINE_ANY,
@@ -1334,4 +1468,365 @@ void
 sit_async_flush (void)
 {
   sit_scheduler_settle ();
+}
+
+struct _SitChannel
+{
+  GObject parent_instance;
+  GMutex lock;
+  GCond changed;
+  GQueue items;
+  GQueue receivers;
+  guint capacity;
+  gboolean closed;
+  GDestroyNotify item_destroy;
+};
+
+G_DEFINE_FINAL_TYPE (SitChannel, sit_channel, G_TYPE_OBJECT)
+
+typedef struct
+{
+  SitJob job;
+  GTask *task;
+  gpointer item;
+} ChannelSitJob;
+
+static void
+channel_job_deliver (SitJob *job)
+{
+  ChannelSitJob *self = (ChannelSitJob *) job;
+  SitChannel *channel = g_task_get_source_object (self->task);
+
+  g_task_return_pointer (self->task, self->item, channel->item_destroy);
+  g_object_unref (self->task);
+  g_free (self);
+}
+
+static void
+channel_hand_over (GTask    *task,
+                   gpointer  item)
+{
+  ChannelSitJob *job = g_new0 (ChannelSitJob, 1);
+
+  job->job.qos = SIT_JOB_USER;
+  job->job.deliver = channel_job_deliver;
+  job->task = task;
+  job->item = item;
+  sit_scheduler_post (&job->job);
+}
+
+static void
+channel_wake (GCancellable *cancellable,
+              gpointer      data)
+{
+  SitChannel *self = data;
+
+  g_mutex_lock (&self->lock);
+  g_cond_broadcast (&self->changed);
+  g_mutex_unlock (&self->lock);
+}
+
+static void
+sit_channel_finalize (GObject *object)
+{
+  SitChannel *self = SIT_CHANNEL (object);
+
+  g_queue_clear_full (&self->items, self->item_destroy);
+  g_mutex_clear (&self->lock);
+  g_cond_clear (&self->changed);
+
+  G_OBJECT_CLASS (sit_channel_parent_class)->finalize (object);
+}
+
+static void
+sit_channel_class_init (SitChannelClass *klass)
+{
+  G_OBJECT_CLASS (klass)->finalize = sit_channel_finalize;
+}
+
+static void
+sit_channel_init (SitChannel *self)
+{
+  g_mutex_init (&self->lock);
+  g_cond_init (&self->changed);
+  g_queue_init (&self->items);
+  g_queue_init (&self->receivers);
+}
+
+/**
+ * sit_channel_new:
+ * @capacity: how many items can wait before senders block, or 0 for no limit
+ * @item_destroy: (nullable): frees items nobody received
+ *
+ * A channel moves items between any threads in the order they were sent.
+ * Worker threads use the blocking calls; the main thread uses
+ * sit_channel_try_send() and sit_channel_receive_async().
+ *
+ * Returns: (transfer full): an open channel
+ */
+SitChannel *
+sit_channel_new (guint          capacity,
+                 GDestroyNotify item_destroy)
+{
+  SitChannel *self = g_object_new (SIT_TYPE_CHANNEL, NULL);
+
+  sit_scheduler_init ();
+  self->capacity = capacity;
+  self->item_destroy = item_destroy;
+
+  return self;
+}
+
+static gboolean
+channel_offer_locked (SitChannel *self,
+                      gpointer    item)
+{
+  if (!g_queue_is_empty (&self->receivers))
+    {
+      channel_hand_over (g_queue_pop_head (&self->receivers), item);
+      return TRUE;
+    }
+  if (self->capacity == 0 || self->items.length < self->capacity)
+    {
+      g_queue_push_tail (&self->items, item);
+      g_cond_broadcast (&self->changed);
+      return TRUE;
+    }
+  return FALSE;
+}
+
+/**
+ * sit_channel_try_send:
+ * @self: a channel
+ * @item: the item, owned by the channel only when %TRUE is returned
+ *
+ * Never blocks.
+ *
+ * Returns: %FALSE if the channel is full or closed
+ */
+gboolean
+sit_channel_try_send (SitChannel *self,
+                      gpointer    item)
+{
+  gboolean sent;
+
+  g_return_val_if_fail (SIT_IS_CHANNEL (self), FALSE);
+
+  g_mutex_lock (&self->lock);
+  sent = !self->closed && channel_offer_locked (self, item);
+  g_mutex_unlock (&self->lock);
+
+  return sent;
+}
+
+/**
+ * sit_channel_send:
+ * @self: a channel
+ * @item: (transfer full): the item
+ * @cancellable: (nullable): stops waiting for room
+ *
+ * Blocks while the channel is full, so it must not be called on the main
+ * thread. The item is freed when it cannot be sent.
+ *
+ * Returns: %FALSE if the channel was closed or @cancellable was cancelled
+ */
+gboolean
+sit_channel_send (SitChannel   *self,
+                  gpointer      item,
+                  GCancellable *cancellable)
+{
+  gboolean sent = FALSE;
+  gulong handler = 0;
+
+  g_return_val_if_fail (SIT_IS_CHANNEL (self), FALSE);
+  g_return_val_if_fail (!g_main_context_is_owner (g_main_context_default ()), FALSE);
+
+  if (cancellable)
+    handler = g_cancellable_connect (cancellable, G_CALLBACK (channel_wake), self, NULL);
+
+  g_mutex_lock (&self->lock);
+  while (!self->closed && !g_cancellable_is_cancelled (cancellable))
+    {
+      sent = channel_offer_locked (self, item);
+      if (sent)
+        break;
+      g_cond_wait (&self->changed, &self->lock);
+    }
+  g_mutex_unlock (&self->lock);
+
+  if (cancellable)
+    g_cancellable_disconnect (cancellable, handler);
+  if (!sent && self->item_destroy)
+    self->item_destroy (item);
+
+  return sent;
+}
+
+/**
+ * sit_channel_receive:
+ * @self: a channel
+ * @cancellable: (nullable): stops waiting
+ * @error: return location for an error
+ *
+ * Blocks until an item arrives, so it must not be called on the main thread.
+ *
+ * Returns: (transfer full) (nullable): the next item, or %NULL without an
+ *   error once the channel is closed and empty
+ */
+gpointer
+sit_channel_receive (SitChannel    *self,
+                     GCancellable  *cancellable,
+                     GError       **error)
+{
+  gpointer item = NULL;
+  gulong handler = 0;
+
+  g_return_val_if_fail (SIT_IS_CHANNEL (self), NULL);
+  g_return_val_if_fail (!g_main_context_is_owner (g_main_context_default ()), NULL);
+
+  if (cancellable)
+    handler = g_cancellable_connect (cancellable, G_CALLBACK (channel_wake), self, NULL);
+
+  g_mutex_lock (&self->lock);
+  while (g_queue_is_empty (&self->items) && !self->closed &&
+         !g_cancellable_is_cancelled (cancellable))
+    g_cond_wait (&self->changed, &self->lock);
+  if (!g_queue_is_empty (&self->items))
+    {
+      item = g_queue_pop_head (&self->items);
+      g_cond_broadcast (&self->changed);
+    }
+  g_mutex_unlock (&self->lock);
+
+  if (cancellable)
+    g_cancellable_disconnect (cancellable, handler);
+  if (!item && !self->closed)
+    g_cancellable_set_error_if_cancelled (cancellable, error);
+
+  return item;
+}
+
+static void
+channel_receiver_cancelled (GTask *task)
+{
+  SitChannel *self = g_task_get_source_object (task);
+  gboolean mine;
+
+  g_mutex_lock (&self->lock);
+  mine = g_queue_remove (&self->receivers, task);
+  g_mutex_unlock (&self->lock);
+
+  if (mine)
+    {
+      g_task_return_new_error_literal (task, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Operation was cancelled");
+      g_object_unref (task);
+    }
+}
+
+/**
+ * sit_channel_receive_async:
+ * @self: a channel
+ * @cancellable: (nullable): stops waiting
+ * @callback: (scope async) (closure user_data): called with the next item
+ * @user_data: data for @callback
+ */
+void
+sit_channel_receive_async (SitChannel          *self,
+                           GCancellable        *cancellable,
+                           GAsyncReadyCallback  callback,
+                           gpointer             user_data)
+{
+  GTask *task;
+  Waiter *waiter;
+  gboolean queued = FALSE;
+  gpointer item = NULL;
+
+  g_return_if_fail (SIT_IS_CHANNEL (self));
+
+  task = g_task_new (self, cancellable, callback, user_data);
+  g_task_set_source_tag (task, sit_channel_receive_async);
+  g_task_set_check_cancellable (task, FALSE);
+
+  waiter = g_new0 (Waiter, 1);
+  if (cancellable)
+    {
+      waiter->cancellable = g_object_ref (cancellable);
+      waiter->handler = watch_cancel (cancellable, task, channel_receiver_cancelled);
+    }
+  g_task_set_task_data (task, waiter, waiter_free);
+
+  g_mutex_lock (&self->lock);
+  if (!g_queue_is_empty (&self->items))
+    {
+      item = g_queue_pop_head (&self->items);
+      g_cond_broadcast (&self->changed);
+    }
+  else if (!self->closed)
+    {
+      g_queue_push_tail (&self->receivers, task);
+      queued = TRUE;
+    }
+  g_mutex_unlock (&self->lock);
+
+  if (!queued)
+    channel_hand_over (task, item);
+}
+
+/**
+ * sit_channel_receive_finish:
+ * @self: a channel
+ * @result: the result passed to the callback of sit_channel_receive_async()
+ * @error: return location for an error
+ *
+ * Returns: (transfer full) (nullable): the next item, or %NULL without an
+ *   error once the channel is closed and empty
+ */
+gpointer
+sit_channel_receive_finish (SitChannel    *self,
+                            GAsyncResult  *result,
+                            GError       **error)
+{
+  g_return_val_if_fail (g_task_is_valid (result, self), NULL);
+
+  return g_task_propagate_pointer (G_TASK (result), error);
+}
+
+/**
+ * sit_channel_close:
+ * @self: a channel
+ *
+ * Can be called from any thread. Receivers get the items already sent, then
+ * the end of the channel; later sends fail.
+ */
+void
+sit_channel_close (SitChannel *self)
+{
+  GQueue receivers = G_QUEUE_INIT;
+
+  g_return_if_fail (SIT_IS_CHANNEL (self));
+
+  g_mutex_lock (&self->lock);
+  self->closed = TRUE;
+  receivers = self->receivers;
+  g_queue_init (&self->receivers);
+  g_cond_broadcast (&self->changed);
+  g_mutex_unlock (&self->lock);
+
+  for (GList *l = receivers.head; l; l = l->next)
+    channel_hand_over (l->data, NULL);
+  g_queue_clear (&receivers);
+}
+
+guint
+sit_channel_get_length (SitChannel *self)
+{
+  guint length;
+
+  g_return_val_if_fail (SIT_IS_CHANNEL (self), 0);
+
+  g_mutex_lock (&self->lock);
+  length = self->items.length;
+  g_mutex_unlock (&self->lock);
+
+  return length;
 }

@@ -4,6 +4,8 @@
 
 #include "gdkeventsprivate.h"
 
+#include <gio/gio.h>
+
 #ifdef __linux__
 #include <sched.h>
 #include <sys/syscall.h>
@@ -15,12 +17,17 @@
 #define IDLE_TIMEOUT (15 * G_TIME_SPAN_SECOND)
 #define DRAIN_BUDGET (2 * G_TIME_SPAN_MILLISECOND)
 #define DRAIN_PRIORITY (GDK_PRIORITY_REDRAW + 1)
+#define MAX_CORES 64
 
 typedef struct
 {
   GMutex lock;
   GCond cond[2];
-  GQueue queue[N_QOS];
+  GQueue queue[MAX_CORES][N_QOS];
+  guint cores;
+  guint next_core;
+  guint64 slots[2];
+  guint queued[N_QOS];
   guint workers[2];
   guint idle[2];
   guint woken[2];
@@ -30,6 +37,11 @@ typedef struct
 } Scheduler;
 
 static Scheduler scheduler;
+static GMutex announce_lock;
+static GArray *background_tids;
+static GDBusConnection *announce_bus;
+static int announce_state;
+static GPrivate home_core;
 static SitJob *completed[N_QOS];
 static int drain_armed;
 static GSource *drain_source;
@@ -88,16 +100,39 @@ out:
   return FALSE;
 }
 
+#define FRAME_WINDOW (50 * G_TIME_SPAN_MILLISECOND)
+
+static gint64 last_frame;
+
 static gboolean
 drain_dispatch (GSource     *source,
                 GSourceFunc  callback,
                 gpointer     user_data)
 {
+  gint64 now = g_get_monotonic_time ();
+
+  if (last_frame != 0 && now - last_frame < FRAME_WINDOW)
+    {
+      g_source_set_ready_time (source, last_frame + FRAME_WINDOW);
+      return G_SOURCE_CONTINUE;
+    }
+
   if (sit_scheduler_drain (DRAIN_BUDGET))
     g_source_set_ready_time (source, 0);
   else
     g_source_set_ready_time (source, -1);
   return G_SOURCE_CONTINUE;
+}
+
+void
+sit_scheduler_after_frame (void)
+{
+  if (drain_source == NULL)
+    return;
+
+  last_frame = g_get_monotonic_time ();
+  if (sit_scheduler_drain (DRAIN_BUDGET))
+    g_source_set_ready_time (drain_source, last_frame + FRAME_WINDOW);
 }
 
 static GSourceFuncs drain_funcs = {
@@ -116,9 +151,11 @@ sit_scheduler_init (void)
       g_mutex_init (&scheduler.lock);
       for (int k = 0; k < 2; k++)
         g_cond_init (&scheduler.cond[k]);
-      for (int q = 0; q < N_QOS; q++)
-        g_queue_init (&scheduler.queue[q]);
-      scheduler.limit[FOREGROUND] = cores;
+      scheduler.cores = MIN (cores, MAX_CORES);
+      for (guint c = 0; c < scheduler.cores; c++)
+        for (int q = 0; q < N_QOS; q++)
+          g_queue_init (&scheduler.queue[c][q]);
+      scheduler.limit[FOREGROUND] = scheduler.cores;
       scheduler.limit[BACKGROUND] = MAX (1, cores / 4);
       scheduler.utility_limit = MAX (1, cores / 2);
 
@@ -150,17 +187,41 @@ sit_scheduler_post (SitJob *job)
 }
 
 static SitJob *
-pick (int kind)
+take (guint core,
+      int   qos)
 {
+  if (scheduler.queued[qos] == 0)
+    return NULL;
+
+  for (guint i = 0; i < scheduler.cores; i++)
+    {
+      GQueue *queue = &scheduler.queue[(core + i) % scheduler.cores][qos];
+
+      if (!g_queue_is_empty (queue))
+        {
+          scheduler.queued[qos]--;
+          return g_queue_pop_head (queue);
+        }
+    }
+
+  return NULL;
+}
+
+static SitJob *
+pick (int   kind,
+      guint core)
+{
+  SitJob *job;
+
   if (kind == BACKGROUND)
-    return g_queue_pop_head (&scheduler.queue[SIT_JOB_BACKGROUND]);
+    return take (core, SIT_JOB_BACKGROUND);
 
   for (int q = SIT_JOB_INTERACTIVE; q <= SIT_JOB_USER; q++)
-    if (!g_queue_is_empty (&scheduler.queue[q]))
-      return g_queue_pop_head (&scheduler.queue[q]);
+    if ((job = take (core, q)))
+      return job;
 
   if (scheduler.utility_running < scheduler.utility_limit)
-    return g_queue_pop_head (&scheduler.queue[SIT_JOB_UTILITY]);
+    return take (core, SIT_JOB_UTILITY);
 
   return NULL;
 }
@@ -169,12 +230,111 @@ static gboolean
 has_work (int kind)
 {
   if (kind == BACKGROUND)
-    return !g_queue_is_empty (&scheduler.queue[SIT_JOB_BACKGROUND]);
+    return scheduler.queued[SIT_JOB_BACKGROUND] > 0;
 
-  return !g_queue_is_empty (&scheduler.queue[SIT_JOB_INTERACTIVE]) ||
-         !g_queue_is_empty (&scheduler.queue[SIT_JOB_USER]) ||
+  return scheduler.queued[SIT_JOB_INTERACTIVE] > 0 ||
+         scheduler.queued[SIT_JOB_USER] > 0 ||
          (scheduler.utility_running < scheduler.utility_limit &&
-          !g_queue_is_empty (&scheduler.queue[SIT_JOB_UTILITY]));
+          scheduler.queued[SIT_JOB_UTILITY] > 0);
+}
+
+static guint
+claim_slot (int kind)
+{
+  for (guint c = 0; c < scheduler.cores; c++)
+    if (!(scheduler.slots[kind] & (G_GUINT64_CONSTANT (1) << c)))
+      {
+        scheduler.slots[kind] |= G_GUINT64_CONSTANT (1) << c;
+        return c;
+      }
+
+  return 0;
+}
+
+static gboolean
+announce_wanted (void)
+{
+  if (announce_state == 0)
+    {
+      const char *policy[] = {
+        "/usr/share/dbus-1/system.d/dev.sinty.Scheduler.conf",
+        "/etc/dbus-1/system.d/dev.sinty.Scheduler.conf",
+      };
+
+      announce_state = 2;
+      if (g_strcmp0 (g_getenv ("SIT_ANNOUNCE"), "off") != 0)
+        for (guint i = 0; i < G_N_ELEMENTS (policy); i++)
+          if (g_file_test (policy[i], G_FILE_TEST_EXISTS))
+            announce_state = 1;
+    }
+
+  return announce_state == 1;
+}
+
+static void
+announce_send_locked (void)
+{
+  GVariantBuilder builder;
+
+  if (!announce_bus || !background_tids)
+    return;
+
+  g_variant_builder_init (&builder, G_VARIANT_TYPE ("au"));
+  for (guint i = 0; i < background_tids->len; i++)
+    g_variant_builder_add (&builder, "u", g_array_index (background_tids, guint32, i));
+  g_dbus_connection_call (announce_bus, "dev.sinty.Scheduler", "/dev/sinty/Scheduler",
+                          "dev.sinty.Scheduler1", "Announce",
+                          g_variant_new ("(au)", &builder), NULL,
+                          G_DBUS_CALL_FLAGS_NO_AUTO_START, -1, NULL, NULL, NULL);
+}
+
+static gpointer
+announce_connect (gpointer data)
+{
+  GDBusConnection *bus = g_bus_get_sync (G_BUS_TYPE_SYSTEM, NULL, NULL);
+
+  g_mutex_lock (&announce_lock);
+  announce_bus = bus;
+  announce_send_locked ();
+  g_mutex_unlock (&announce_lock);
+
+  return NULL;
+}
+
+static void
+announce_start (void)
+{
+  static gsize started = 0;
+
+  if (g_once_init_enter (&started))
+    {
+      if (announce_wanted ())
+        g_thread_unref (g_thread_new ("sit-announce", announce_connect, NULL));
+      g_once_init_leave (&started, 1);
+    }
+}
+
+static void
+announce_background (gboolean joining)
+{
+#ifdef SYS_gettid
+  guint32 tid = (guint32) syscall (SYS_gettid);
+
+  g_mutex_lock (&announce_lock);
+  if (!background_tids)
+    background_tids = g_array_new (FALSE, FALSE, sizeof (guint32));
+  if (joining)
+    g_array_append_val (background_tids, tid);
+  else
+    for (guint i = 0; i < background_tids->len; i++)
+      if (g_array_index (background_tids, guint32, i) == tid)
+        {
+          g_array_remove_index_fast (background_tids, i);
+          break;
+        }
+  announce_send_locked ();
+  g_mutex_unlock (&announce_lock);
+#endif
 }
 
 static gpointer
@@ -194,11 +354,15 @@ worker_main (gpointer data)
   if (kind == BACKGROUND)
     syscall (SYS_ioprio_set, 1, 0, 3 << 13);
 #endif
+  if (kind == BACKGROUND)
+    announce_background (TRUE);
 
   g_mutex_lock (&scheduler.lock);
+  guint core = claim_slot (kind);
+  g_private_set (&home_core, GUINT_TO_POINTER (core + 1));
   for (;;)
     {
-      SitJob *job = pick (kind);
+      SitJob *job = pick (kind, core);
 
       if (job)
         {
@@ -212,7 +376,7 @@ worker_main (gpointer data)
           if (utility)
             {
               scheduler.utility_running--;
-              if (!g_queue_is_empty (&scheduler.queue[SIT_JOB_UTILITY]) &&
+              if (scheduler.queued[SIT_JOB_UTILITY] > 0 &&
                   scheduler.idle[FOREGROUND] > scheduler.woken[FOREGROUND])
                 {
                   scheduler.woken[FOREGROUND]++;
@@ -232,7 +396,11 @@ worker_main (gpointer data)
         break;
     }
   scheduler.workers[kind]--;
+  scheduler.slots[kind] &= ~(G_GUINT64_CONSTANT (1) << core);
   g_mutex_unlock (&scheduler.lock);
+
+  if (kind == BACKGROUND)
+    announce_background (FALSE);
 
   return NULL;
 }
@@ -244,9 +412,14 @@ sit_scheduler_submit (SitJob *job)
   gboolean inline_run = FALSE;
 
   sit_scheduler_init ();
+  if (kind == BACKGROUND)
+    announce_start ();
 
   g_mutex_lock (&scheduler.lock);
-  g_queue_push_tail (&scheduler.queue[job->qos], job);
+  guint home = GPOINTER_TO_UINT (g_private_get (&home_core));
+  guint core = home > 0 ? home - 1 : scheduler.next_core++ % scheduler.cores;
+  g_queue_push_tail (&scheduler.queue[core][job->qos], job);
+  scheduler.queued[job->qos]++;
   if (scheduler.idle[kind] > scheduler.woken[kind])
     {
       scheduler.woken[kind]++;
@@ -262,7 +435,11 @@ sit_scheduler_submit (SitJob *job)
       if (thread)
         g_thread_unref (thread);
       else if (--scheduler.workers[kind] == 0)
-        inline_run = g_queue_remove (&scheduler.queue[job->qos], job);
+        {
+          inline_run = g_queue_remove (&scheduler.queue[core][job->qos], job);
+          if (inline_run)
+            scheduler.queued[job->qos]--;
+        }
     }
   g_mutex_unlock (&scheduler.lock);
 
