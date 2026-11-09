@@ -120,7 +120,11 @@ drain_dispatch (GSource     *source,
   if (sit_scheduler_drain (DRAIN_BUDGET))
     g_source_set_ready_time (source, 0);
   else
-    g_source_set_ready_time (source, -1);
+    {
+      g_source_set_ready_time (source, -1);
+      if (g_atomic_int_get (&drain_armed))
+        g_source_set_ready_time (source, 0);
+    }
   return G_SOURCE_CONTINUE;
 }
 
