@@ -905,6 +905,9 @@ subdir('gtk/css')
 subdir('gdk')
 subdir('gsk')
 subdir('gtk')
+if host_machine.system() == 'linux'
+  subdir('sitvfs')
+endif
 
 subdir('tools')
 subdir('po')
