@@ -48,6 +48,7 @@
 #include "gtkprintbackendprivate.h"
 #include "gtkprinter.h"
 #include "gtkprintjob.h"
+#include "gdk/sitschedulerprivate.h"
 
 
 typedef struct
@@ -410,19 +411,9 @@ unix_finish_send  (GtkPrintJob  *job,
 }
 
 static void
-unix_end_run (GtkPrintOperation *op,
-              gboolean           wait,
-              gboolean           cancelled)
+unix_send (GtkPrintOperation *op)
 {
   GtkPrintOperationUnix *op_unix = op->priv->platform_data;
-
-  cairo_surface_finish (op_unix->surface);
-
-  if (cancelled)
-    return;
-
-  if (wait)
-    op_unix->loop = g_main_loop_new (NULL, FALSE);
 
   /* TODO: Check for error */
   if (op_unix->job != NULL)
@@ -432,6 +423,71 @@ unix_end_run (GtkPrintOperation *op,
                           unix_finish_send,
                           op, NULL);
     }
+  else
+    {
+      op_unix->data_sent = TRUE;
+      if (op_unix->loop)
+        g_main_loop_quit (op_unix->loop);
+    }
+}
+
+typedef struct
+{
+  SitJob job;
+  GtkPrintOperation *op;
+  cairo_surface_t *surface;
+} FinishJob;
+
+static void
+finish_job_run (SitJob *job)
+{
+  FinishJob *self = (FinishJob *) job;
+
+  cairo_surface_finish (self->surface);
+  sit_scheduler_post (job);
+}
+
+static void
+finish_job_deliver (SitJob *job)
+{
+  FinishJob *self = (FinishJob *) job;
+
+  unix_send (self->op);
+  cairo_surface_destroy (self->surface);
+  g_object_unref (self->op);
+  g_free (self);
+}
+
+static void
+unix_end_run (GtkPrintOperation *op,
+              gboolean           wait,
+              gboolean           cancelled)
+{
+  GtkPrintOperationUnix *op_unix = op->priv->platform_data;
+
+  if (cancelled || !sit_scheduler_enabled ())
+    {
+      cairo_surface_finish (op_unix->surface);
+      if (cancelled)
+        return;
+    }
+
+  if (wait)
+    op_unix->loop = g_main_loop_new (NULL, FALSE);
+
+  if (sit_scheduler_enabled ())
+    {
+      FinishJob *job = g_new0 (FinishJob, 1);
+
+      job->job.qos = SIT_JOB_USER;
+      job->job.run = finish_job_run;
+      job->job.deliver = finish_job_deliver;
+      job->op = g_object_ref (op);
+      job->surface = cairo_surface_reference (op_unix->surface);
+      sit_scheduler_submit (&job->job);
+    }
+  else
+    unix_send (op);
 
   if (wait)
     {

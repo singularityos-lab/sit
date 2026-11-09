@@ -34,6 +34,7 @@
 #include "gtkprivate.h"
 
 #include "gtkprintoperation-private.h"
+#include "gdk/sitschedulerprivate.h"
 
 /**
  * GtkPrintOperation:
@@ -1986,6 +1987,32 @@ pdf_end_page (GtkPrintOperation *op,
     cairo_show_page (cr);
 }
 
+typedef struct
+{
+  SitJob job;
+  cairo_surface_t *surface;
+  GMainLoop *loop;
+  gboolean done;
+} PdfFinishJob;
+
+static void
+pdf_finish_run (SitJob *job)
+{
+  PdfFinishJob *self = (PdfFinishJob *) job;
+
+  cairo_surface_finish (self->surface);
+  sit_scheduler_post (job);
+}
+
+static void
+pdf_finish_deliver (SitJob *job)
+{
+  PdfFinishJob *self = (PdfFinishJob *) job;
+
+  self->done = TRUE;
+  g_main_loop_quit (self->loop);
+}
+
 static void
 pdf_end_run (GtkPrintOperation *op,
 	     gboolean           wait,
@@ -1994,7 +2021,22 @@ pdf_end_run (GtkPrintOperation *op,
   GtkPrintOperationPrivate *priv = gtk_print_operation_get_instance_private (op);
   cairo_surface_t *surface = priv->platform_data;
 
-  cairo_surface_finish (surface);
+  if (cancelled || !sit_scheduler_enabled ())
+    cairo_surface_finish (surface);
+  else
+    {
+      PdfFinishJob job = { 0 };
+
+      job.job.qos = SIT_JOB_USER;
+      job.job.run = pdf_finish_run;
+      job.job.deliver = pdf_finish_deliver;
+      job.surface = surface;
+      job.loop = g_main_loop_new (NULL, FALSE);
+      sit_scheduler_submit (&job.job);
+      while (!job.done)
+        g_main_loop_run (job.loop);
+      g_main_loop_unref (job.loop);
+    }
   cairo_surface_destroy (surface);
 
   priv->platform_data = NULL;

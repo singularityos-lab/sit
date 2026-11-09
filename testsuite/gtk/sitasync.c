@@ -1174,6 +1174,71 @@ test_deferred_placeholder (void)
   g_object_unref (texture);
 }
 
+static void
+draw_print_page (GtkPrintOperation *op,
+                 GtkPrintContext   *context,
+                 int                page,
+                 gpointer           data)
+{
+  cairo_t *cr = gtk_print_context_get_cairo_context (context);
+
+  for (int i = 0; i < 400; i++)
+    {
+      cairo_move_to (cr, 10 + (i % 20) * 25, 20 + (i / 20) * 30);
+      cairo_line_to (cr, 30 + (i % 20) * 25, 40 + (i / 20) * 30 + page);
+    }
+  cairo_stroke (cr);
+}
+
+static gboolean
+count_frames_tick (GtkWidget     *widget,
+                   GdkFrameClock *clock,
+                   gpointer       data)
+{
+  (*(int *) data)++;
+  return G_SOURCE_CONTINUE;
+}
+
+static void
+test_print_to_file (void)
+{
+  char *dir = g_dir_make_tmp ("sitprint-XXXXXX", NULL);
+  char *path = g_build_filename (dir, "out.pdf", NULL);
+  GtkPrintOperation *op = gtk_print_operation_new ();
+  GtkPrintOperationResult result;
+  GtkWidget *window = gtk_window_new ();
+  GError *error = NULL;
+  char *contents = NULL;
+  gsize length = 0;
+  int ticks = 0;
+
+  gtk_window_present (GTK_WINDOW (window));
+  while (!gtk_widget_get_mapped (window))
+    g_main_context_iteration (NULL, TRUE);
+  gtk_widget_add_tick_callback (window, count_frames_tick, &ticks, NULL);
+
+  gtk_print_operation_set_export_filename (op, path);
+  gtk_print_operation_set_n_pages (op, 300);
+  g_signal_connect (op, "draw-page", G_CALLBACK (draw_print_page), NULL);
+
+  result = gtk_print_operation_run (op, GTK_PRINT_OPERATION_ACTION_EXPORT, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (result, ==, GTK_PRINT_OPERATION_RESULT_APPLY);
+  g_assert_true (g_file_get_contents (path, &contents, &length, NULL));
+  g_test_message ("exported 300 pages into %" G_GSIZE_FORMAT " bytes, %d frames ran meanwhile", length, ticks);
+  g_assert_cmpuint (length, >, 1000);
+  g_assert_true (g_str_has_prefix (contents, "%PDF"));
+  g_assert_true (g_str_has_suffix (g_strchomp (contents + length - 16), "%%EOF"));
+
+  g_free (contents);
+  g_unlink (path);
+  g_rmdir (dir);
+  g_free (path);
+  g_free (dir);
+  g_object_unref (op);
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1202,6 +1267,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/sit/async/file-load", test_file_load);
   g_test_add_func ("/sit/async/parallel-filter", test_parallel_filter);
   g_test_add_func ("/sit/async/deferred-placeholder", test_deferred_placeholder);
+  g_test_add_func ("/sit/async/print-to-file", test_print_to_file);
   g_test_add_func ("/sit/async/throughput", test_throughput);
 
   return g_test_run ();
