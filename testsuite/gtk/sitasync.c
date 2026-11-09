@@ -1113,6 +1113,67 @@ test_parallel_filter (void)
   g_object_unref (model);
 }
 
+static void
+count_invalidations (GdkPaintable *paintable,
+                     int          *count)
+{
+  (*count)++;
+}
+
+static void
+test_deferred_placeholder (void)
+{
+  const int size = 300;
+  guchar *pixels = g_malloc (size * size * 4);
+  guchar *back = g_malloc (size * size * 4);
+  GBytes *raw, *png;
+  GdkTexture *source, *texture;
+  GtkSnapshot *snapshot;
+  GskRenderNode *node;
+  int invalidated = 0;
+
+  for (int i = 0; i < size * size * 4; i++)
+    pixels[i] = g_random_int_range (0, 256);
+  for (int i = 3; i < size * size * 4; i += 4)
+    pixels[i] = 255;
+  raw = g_bytes_new_take (pixels, size * size * 4);
+  source = gdk_memory_texture_new (size, size, GDK_MEMORY_R8G8B8A8, raw, size * 4);
+  png = gdk_texture_save_to_png_bytes (source);
+  g_assert_cmpuint (g_bytes_get_size (png), >=, 64 * 1024);
+
+  g_assert_true (g_main_context_acquire (NULL));
+  texture = gdk_texture_new_from_bytes (png, NULL);
+  g_main_context_release (NULL);
+  g_assert_cmpstr (G_OBJECT_TYPE_NAME (texture), ==, "GdkDeferredTexture");
+  g_assert_cmpint (gdk_paintable_get_intrinsic_width (GDK_PAINTABLE (texture)), ==, size);
+  g_assert_cmpint (gdk_paintable_get_intrinsic_height (GDK_PAINTABLE (texture)), ==, size);
+  g_assert_cmpint (gdk_paintable_get_flags (GDK_PAINTABLE (texture)), ==, GDK_PAINTABLE_STATIC_SIZE);
+  g_signal_connect (texture, "invalidate-contents", G_CALLBACK (count_invalidations), &invalidated);
+
+  while (invalidated == 0)
+    g_main_context_iteration (NULL, TRUE);
+  g_assert_cmpint (invalidated, ==, 1);
+  g_assert_cmpint (gdk_paintable_get_flags (GDK_PAINTABLE (texture)), ==,
+                   GDK_PAINTABLE_STATIC_SIZE | GDK_PAINTABLE_STATIC_CONTENTS);
+
+  snapshot = gtk_snapshot_new ();
+  gdk_paintable_snapshot (GDK_PAINTABLE (texture), snapshot, size, size);
+  node = gtk_snapshot_free_to_node (snapshot);
+  g_assert_nonnull (node);
+  gsk_render_node_unref (node);
+
+  gdk_texture_download (texture, back, size * 4);
+  gdk_texture_download (source, pixels = g_malloc (size * size * 4), size * 4);
+  g_assert_cmpmem (back, size * size * 4, pixels, size * size * 4);
+
+  g_free (pixels);
+  g_free (back);
+  g_bytes_unref (raw);
+  g_bytes_unref (png);
+  g_object_unref (source);
+  g_object_unref (texture);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1140,6 +1201,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/sit/async/frame-drain", test_frame_drain);
   g_test_add_func ("/sit/async/file-load", test_file_load);
   g_test_add_func ("/sit/async/parallel-filter", test_parallel_filter);
+  g_test_add_func ("/sit/async/deferred-placeholder", test_deferred_placeholder);
   g_test_add_func ("/sit/async/throughput", test_throughput);
 
   return g_test_run ();

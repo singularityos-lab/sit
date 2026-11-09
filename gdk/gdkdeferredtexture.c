@@ -4,6 +4,8 @@
 
 #include "gdkcolorstateprivate.h"
 #include "gdkmemoryformatprivate.h"
+#include "gdkpaintable.h"
+#include "gdksnapshot.h"
 #include "gdktextureprivate.h"
 #include "loaders/gdkjpegprivate.h"
 #include "loaders/gdkpngprivate.h"
@@ -31,9 +33,51 @@ struct _GdkDeferredTexture
   Loader loader;
   GBytes *bytes;
   GdkTexture *decoded;
+  gboolean shown;
 };
 
-G_DEFINE_FINAL_TYPE (GdkDeferredTexture, gdk_deferred_texture, GDK_TYPE_TEXTURE)
+static GdkPaintableInterface *parent_paintable;
+
+static void gdk_deferred_texture_paintable_init (GdkPaintableInterface *iface);
+
+G_DEFINE_FINAL_TYPE_WITH_CODE (GdkDeferredTexture, gdk_deferred_texture, GDK_TYPE_TEXTURE,
+                               G_IMPLEMENT_INTERFACE (GDK_TYPE_PAINTABLE,
+                                                      gdk_deferred_texture_paintable_init))
+
+static void
+gdk_deferred_texture_snapshot (GdkPaintable *paintable,
+                               GdkSnapshot  *snapshot,
+                               double        width,
+                               double        height)
+{
+  GdkDeferredTexture *self = GDK_DEFERRED_TEXTURE (paintable);
+
+  if (g_atomic_int_get (&self->state) == DONE)
+    parent_paintable->snapshot (paintable, snapshot, width, height);
+}
+
+static GdkPaintableFlags
+gdk_deferred_texture_get_flags (GdkPaintable *paintable)
+{
+  GdkDeferredTexture *self = GDK_DEFERRED_TEXTURE (paintable);
+
+  if (self->shown)
+    return parent_paintable->get_flags (paintable);
+
+  return GDK_PAINTABLE_STATIC_SIZE;
+}
+
+static void
+gdk_deferred_texture_paintable_init (GdkPaintableInterface *iface)
+{
+  parent_paintable = g_type_interface_peek_parent (iface);
+  iface->get_current_image = parent_paintable->get_current_image;
+  iface->get_intrinsic_width = parent_paintable->get_intrinsic_width;
+  iface->get_intrinsic_height = parent_paintable->get_intrinsic_height;
+  iface->get_intrinsic_aspect_ratio = parent_paintable->get_intrinsic_aspect_ratio;
+  iface->snapshot = gdk_deferred_texture_snapshot;
+  iface->get_flags = gdk_deferred_texture_get_flags;
+}
 
 typedef struct
 {
@@ -99,6 +143,11 @@ decode_job_deliver (SitJob *job)
 {
   DecodeJob *self = (DecodeJob *) job;
 
+  if (!self->texture->shown)
+    {
+      gdk_paintable_invalidate_contents (GDK_PAINTABLE (self->texture));
+      self->texture->shown = TRUE;
+    }
   g_object_unref (self->texture);
   g_free (self);
 }
