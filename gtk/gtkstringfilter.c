@@ -19,7 +19,7 @@
 
 #include "config.h"
 
-#include "gtkstringfilter.h"
+#include "gtkstringfilterprivate.h"
 
 #include "gtktypebuiltins.h"
 
@@ -96,24 +96,33 @@ gtk_string_filter_has_search (GtkStringFilter *self)
   return self->search_prepared != NULL;
 }
 
-static gboolean
-gtk_string_filter_match (GtkFilter *filter,
-                         gpointer   item)
+char *
+gtk_string_filter_evaluate (GtkStringFilter *self,
+                            gpointer         item)
 {
-  GtkStringFilter *self = GTK_STRING_FILTER (filter);
   GValue value = G_VALUE_INIT;
+  char *string;
+
+  if (self->expression == NULL ||
+      !gtk_expression_evaluate (self->expression, item, &value))
+    return NULL;
+  string = g_value_dup_string (&value);
+  g_value_unset (&value);
+
+  return string;
+}
+
+gboolean
+gtk_string_filter_match_string (GtkStringFilter *self,
+                                const char      *string)
+{
   char *prepared;
-  const char *s;
   gboolean result;
 
   if (!gtk_string_filter_has_search (self))
     return TRUE;
 
-  if (self->expression == NULL ||
-      !gtk_expression_evaluate (self->expression, item, &value))
-    return FALSE;
-  s = g_value_get_string (&value);
-  prepared = gtk_string_filter_prepare (self, s);
+  prepared = gtk_string_filter_prepare (self, string);
   if (prepared == NULL)
     return FALSE;
 
@@ -132,12 +141,27 @@ gtk_string_filter_match (GtkFilter *filter,
       g_assert_not_reached ();
     }
 
-#if 0
-  g_print ("%s (%s) %s %s (%s)\n", s, prepared, result ? "==" : "!=", self->search, self->search_prepared);
-#endif
-
   g_free (prepared);
-  g_value_unset (&value);
+
+  return result;
+}
+
+static gboolean
+gtk_string_filter_match (GtkFilter *filter,
+                         gpointer   item)
+{
+  GtkStringFilter *self = GTK_STRING_FILTER (filter);
+  char *string;
+  gboolean result;
+
+  if (!gtk_string_filter_has_search (self))
+    return TRUE;
+
+  string = gtk_string_filter_evaluate (self, item);
+  if (string == NULL)
+    return FALSE;
+  result = gtk_string_filter_match_string (self, string);
+  g_free (string);
 
   return result;
 }

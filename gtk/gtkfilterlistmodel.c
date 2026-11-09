@@ -25,6 +25,8 @@
 #include "gtkfilterprivate.h"
 #include "gtkprivate.h"
 #include "gtksectionmodelprivate.h"
+#include "gtkstringfilterprivate.h"
+#include "gdk/sitschedulerprivate.h"
 
 /**
  * GtkFilterListModel:
@@ -356,6 +358,86 @@ item_changed_cb (gpointer item,
     }
 }
 
+#define PARALLEL_MIN 2048
+#define PARALLEL_CHUNK 1024
+
+typedef struct
+{
+  GtkStringFilter *filter;
+  char **strings;
+  guint8 *matched;
+  guint n;
+} FilterPass;
+
+static void
+filter_chunk_cb (guint    index,
+                 gpointer data)
+{
+  FilterPass *pass = data;
+  guint end = MIN (pass->n, (index + 1) * PARALLEL_CHUNK);
+
+  for (guint i = index * PARALLEL_CHUNK; i < end; i++)
+    pass->matched[i] = pass->strings[i] != NULL &&
+                       gtk_string_filter_match_string (pass->filter, pass->strings[i]);
+}
+
+static gboolean
+gtk_filter_list_model_run_filter_parallel (GtkFilterListModel *self,
+                                           guint               n_steps)
+{
+  GtkBitsetIter iter;
+  FilterPass pass;
+  guint *positions;
+  guint pos, n;
+  gboolean more;
+
+  if (!GTK_IS_STRING_FILTER (self->filter) ||
+      self->watch_items ||
+      MIN (n_steps, gtk_bitset_get_size (self->pending)) < PARALLEL_MIN ||
+      !sit_scheduler_enabled ())
+    return FALSE;
+
+  n = MIN (n_steps, gtk_bitset_get_size (self->pending));
+  positions = g_new (guint, n);
+  pass.filter = GTK_STRING_FILTER (self->filter);
+  pass.strings = g_new (char *, n);
+  pass.matched = g_new (guint8, n);
+  pass.n = n;
+
+  more = gtk_bitset_iter_init_first (&iter, self->pending, &pos);
+  for (guint i = 0; i < n && more; i++, more = gtk_bitset_iter_next (&iter, &pos))
+    {
+      gpointer item = g_list_model_get_item (self->model, pos);
+
+      positions[i] = pos;
+      pass.strings[i] = gtk_string_filter_evaluate (pass.filter, item);
+      g_clear_object (&item);
+    }
+
+  sit_scheduler_parallel (SIT_JOB_INTERACTIVE, (n + PARALLEL_CHUNK - 1) / PARALLEL_CHUNK,
+                          filter_chunk_cb, &pass);
+
+  for (guint i = 0; i < n; i++)
+    {
+      if (pass.matched[i])
+        gtk_bitset_add (self->matches, positions[i]);
+      else
+        gtk_bitset_remove (self->matches, positions[i]);
+      g_free (pass.strings[i]);
+    }
+
+  if (more)
+    gtk_bitset_remove_range_closed (self->pending, 0, pos - 1);
+  else
+    g_clear_pointer (&self->pending, gtk_bitset_unref);
+
+  g_free (positions);
+  g_free (pass.strings);
+  g_free (pass.matched);
+
+  return TRUE;
+}
+
 static void
 gtk_filter_list_model_run_filter (GtkFilterListModel *self,
                                   guint               n_steps)
@@ -367,6 +449,9 @@ gtk_filter_list_model_run_filter (GtkFilterListModel *self,
   g_return_if_fail (GTK_IS_FILTER_LIST_MODEL (self));
 
   if (self->pending == NULL)
+    return;
+
+  if (gtk_filter_list_model_run_filter_parallel (self, n_steps))
     return;
 
   for (i = 0, more = gtk_bitset_iter_init_first (&iter, self->pending, &pos);

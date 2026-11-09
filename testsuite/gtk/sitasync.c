@@ -1070,6 +1070,49 @@ test_file_load (void)
   g_object_unref (cancellable);
 }
 
+static void
+test_parallel_filter (void)
+{
+  const guint total = 200000;
+  GtkStringList *list = gtk_string_list_new (NULL);
+  GtkStringFilter *filter;
+  GtkFilterListModel *model;
+  guint expected = 0;
+  gint64 start;
+
+  for (guint i = 0; i < total; i++)
+    {
+      char *s = g_strdup_printf ("Élément Numéro %u %s", i, i % 7 == 0 ? "SPÉCIAL" : "commun");
+
+      gtk_string_list_take (list, s);
+      if (i % 7 == 0)
+        expected++;
+    }
+  filter = gtk_string_filter_new (gtk_property_expression_new (GTK_TYPE_STRING_OBJECT, NULL, "string"));
+  model = gtk_filter_list_model_new (G_LIST_MODEL (list), GTK_FILTER (filter));
+
+  start = g_get_monotonic_time ();
+  gtk_string_filter_set_search (filter, "spécial");
+  g_test_message ("filtered %u items in %.1f ms", total, (g_get_monotonic_time () - start) / 1000.0);
+  g_assert_cmpuint (g_list_model_get_n_items (G_LIST_MODEL (model)), ==, expected);
+  for (guint i = 0; i < 50; i++)
+    {
+      GtkStringObject *item = g_list_model_get_item (G_LIST_MODEL (model), i);
+
+      g_assert_nonnull (strstr (gtk_string_object_get_string (item), "SPÉCIAL"));
+      g_object_unref (item);
+    }
+
+  gtk_string_filter_set_match_mode (filter, GTK_STRING_FILTER_MATCH_MODE_PREFIX);
+  gtk_string_filter_set_search (filter, "élément numéro 1999");
+  g_assert_cmpuint (g_list_model_get_n_items (G_LIST_MODEL (model)), ==, 111);
+
+  gtk_string_filter_set_ignore_case (filter, FALSE);
+  g_assert_cmpuint (g_list_model_get_n_items (G_LIST_MODEL (model)), ==, 0);
+
+  g_object_unref (model);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1096,6 +1139,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/sit/async/work-stealing", test_work_stealing);
   g_test_add_func ("/sit/async/frame-drain", test_frame_drain);
   g_test_add_func ("/sit/async/file-load", test_file_load);
+  g_test_add_func ("/sit/async/parallel-filter", test_parallel_filter);
   g_test_add_func ("/sit/async/throughput", test_throughput);
 
   return g_test_run ();
