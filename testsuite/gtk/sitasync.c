@@ -1,5 +1,7 @@
 #include <gtk/gtk.h>
 #include <gtk/sit.h>
+#include <string.h>
+#include <glib/gstdio.h>
 
 #ifdef __linux__
 #include <sched.h>
@@ -957,6 +959,117 @@ test_frame_drain (void)
   gtk_window_destroy (GTK_WINDOW (window));
 }
 
+typedef struct
+{
+  gboolean done;
+  GBytes *bytes;
+  GError *error;
+} Loaded;
+
+static void
+file_loaded (GObject      *source,
+             GAsyncResult *result,
+             gpointer      data)
+{
+  Loaded *loaded = data;
+
+  loaded->bytes = sit_file_load_finish (G_FILE (source), result, &loaded->error);
+  loaded->done = TRUE;
+}
+
+static GBytes *
+load (GFile *file, SitQos qos, GCancellable *cancellable, GError **error)
+{
+  Loaded loaded = { 0 };
+
+  sit_file_load_async (file, qos, cancellable, file_loaded, &loaded);
+  spin_until (&loaded.done);
+  if (loaded.error)
+    g_propagate_error (error, loaded.error);
+  return loaded.bytes;
+}
+
+static void
+test_file_load (void)
+{
+  char *dir = g_dir_make_tmp ("sitio-XXXXXX", NULL);
+  char *path = g_build_filename (dir, "big", NULL);
+  gsize size = 9 * 1024 * 1024 + 17;
+  guint8 *data = g_malloc (size);
+  GFile *file, *missing, *proc;
+  GCancellable *cancellable = g_cancellable_new ();
+  GBytes *bytes;
+  GError *error = NULL;
+
+  for (gsize i = 0; i < size; i++)
+    data[i] = (guint8) (i * 31 + 7);
+  g_assert_true (g_file_set_contents (path, (char *) data, size, NULL));
+  file = g_file_new_for_path (path);
+
+  bytes = load (file, SIT_QOS_USER, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_cmpmem (g_bytes_get_data (bytes, NULL), g_bytes_get_size (bytes), data, size);
+  g_bytes_unref (bytes);
+
+  bytes = load (file, SIT_QOS_BACKGROUND, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_cmpuint (g_bytes_get_size (bytes), ==, size);
+  g_bytes_unref (bytes);
+
+  missing = g_file_new_for_path ("/nonexistent/sit/file");
+  bytes = load (missing, SIT_QOS_USER, NULL, &error);
+  g_assert_null (bytes);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  g_clear_error (&error);
+
+  proc = g_file_new_for_path ("/proc/self/status");
+  bytes = load (proc, SIT_QOS_USER, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (strstr (g_bytes_get_data (bytes, NULL), "Name:"));
+  g_bytes_unref (bytes);
+
+  g_cancellable_cancel (cancellable);
+  bytes = load (file, SIT_QOS_USER, cancellable, &error);
+  g_assert_null (bytes);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_clear_error (&error);
+
+  {
+    const int total = 200;
+    int done = 0;
+    Loaded many[200];
+    gint64 start = g_get_monotonic_time ();
+
+    memset (many, 0, sizeof many);
+    for (int i = 0; i < total; i++)
+      sit_file_load_async (proc, SIT_QOS_USER, NULL, file_loaded, &many[i]);
+    while (done < total)
+      {
+        g_main_context_iteration (NULL, TRUE);
+        done = 0;
+        for (int i = 0; i < total; i++)
+          done += many[i].done;
+      }
+    for (int i = 0; i < total; i++)
+      {
+        g_assert_no_error (many[i].error);
+        g_bytes_unref (many[i].bytes);
+      }
+    g_test_message ("%d concurrent loads in %.1f ms", total,
+                    (g_get_monotonic_time () - start) / 1000.0);
+  }
+
+  g_unlink (path);
+  g_rmdir (dir);
+  g_free (path);
+  g_free (dir);
+  g_free (data);
+  g_object_unref (file);
+  g_object_unref (missing);
+  g_object_unref (proc);
+  g_object_unref (cancellable);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -982,6 +1095,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/sit/async/channel", test_channel);
   g_test_add_func ("/sit/async/work-stealing", test_work_stealing);
   g_test_add_func ("/sit/async/frame-drain", test_frame_drain);
+  g_test_add_func ("/sit/async/file-load", test_file_load);
   g_test_add_func ("/sit/async/throughput", test_throughput);
 
   return g_test_run ();

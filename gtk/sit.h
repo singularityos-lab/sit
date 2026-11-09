@@ -268,6 +268,18 @@ GDK_AVAILABLE_IN_ALL
 guint sit_channel_get_length (SitChannel *self);
 
 GDK_AVAILABLE_IN_ALL
+void sit_file_load_async (GFile               *file,
+                          SitQos               qos,
+                          GCancellable        *cancellable,
+                          GAsyncReadyCallback  callback,
+                          gpointer             user_data);
+
+GDK_AVAILABLE_IN_ALL
+GBytes *sit_file_load_finish (GFile         *file,
+                              GAsyncResult  *result,
+                              GError       **error);
+
+GDK_AVAILABLE_IN_ALL
 void sit_async_flush (void);
 
 G_END_DECLS
