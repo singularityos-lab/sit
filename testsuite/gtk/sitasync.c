@@ -1239,6 +1239,65 @@ test_print_to_file (void)
   gtk_window_destroy (GTK_WINDOW (window));
 }
 
+typedef struct
+{
+  gboolean done;
+  GValue value;
+  GError *error;
+} Deserialized;
+
+static void
+deserialized (GObject      *source,
+              GAsyncResult *result,
+              gpointer      data)
+{
+  Deserialized *out = data;
+
+  gdk_content_deserialize_finish (result, &out->value, &out->error);
+  out->done = TRUE;
+}
+
+static void
+test_clipboard_texture (void)
+{
+  const int size = 300;
+  guchar *pixels = g_malloc (size * size * 4);
+  GBytes *raw, *png;
+  GdkTexture *source, *texture;
+  GInputStream *stream;
+  Deserialized out = { 0 };
+  int invalidated = 0;
+
+  for (int i = 0; i < size * size * 4; i++)
+    pixels[i] = (i % 4 == 3) ? 255 : g_random_int_range (0, 256);
+  raw = g_bytes_new_take (pixels, size * size * 4);
+  source = gdk_memory_texture_new (size, size, GDK_MEMORY_R8G8B8A8, raw, size * 4);
+  png = gdk_texture_save_to_png_bytes (source);
+  stream = g_memory_input_stream_new_from_bytes (png);
+
+  g_value_init (&out.value, GDK_TYPE_TEXTURE);
+  gdk_content_deserialize_async (stream, "image/png", GDK_TYPE_TEXTURE,
+                                 G_PRIORITY_DEFAULT, NULL, deserialized, &out);
+  spin_until (&out.done);
+  g_assert_no_error (out.error);
+  texture = g_value_get_object (&out.value);
+  g_test_message ("clipboard image arrives as %s", G_OBJECT_TYPE_NAME (texture));
+  g_assert_cmpstr (G_OBJECT_TYPE_NAME (texture), ==, "GdkDeferredTexture");
+  g_assert_cmpint (gdk_texture_get_width (texture), ==, size);
+  if (gdk_paintable_get_flags (GDK_PAINTABLE (texture)) != (GDK_PAINTABLE_STATIC_SIZE | GDK_PAINTABLE_STATIC_CONTENTS))
+    {
+      g_signal_connect (texture, "invalidate-contents", G_CALLBACK (count_invalidations), &invalidated);
+      while (invalidated == 0)
+        g_main_context_iteration (NULL, TRUE);
+    }
+
+  g_value_unset (&out.value);
+  g_object_unref (stream);
+  g_bytes_unref (raw);
+  g_bytes_unref (png);
+  g_object_unref (source);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1268,6 +1327,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/sit/async/parallel-filter", test_parallel_filter);
   g_test_add_func ("/sit/async/deferred-placeholder", test_deferred_placeholder);
   g_test_add_func ("/sit/async/print-to-file", test_print_to_file);
+  g_test_add_func ("/sit/async/clipboard-texture", test_clipboard_texture);
   g_test_add_func ("/sit/async/throughput", test_throughput);
 
   return g_test_run ();
