@@ -1713,6 +1713,84 @@ test_touch_hold_secondary (void)
   gtk_window_destroy (GTK_WINDOW (window));
 }
 
+static void
+count_clicked_cb (GtkButton *button, guint *count)
+{
+  (*count)++;
+}
+
+static void
+button_center (GtkWidget *button, double *x, double *y)
+{
+  GtkNative *native = gtk_widget_get_native (button);
+  graphene_point_t p;
+  double nx, ny;
+
+  g_assert_true (gtk_widget_compute_point (button, GTK_WIDGET (native),
+                                           &GRAPHENE_POINT_INIT (gtk_widget_get_width (button) / 2.0,
+                                                                 gtk_widget_get_height (button) / 2.0),
+                                           &p));
+  gtk_native_get_surface_transform (native, &nx, &ny);
+  *x = p.x + nx;
+  *y = p.y + ny;
+}
+
+static void
+test_rolling_touch_buttons (gconstpointer data)
+{
+  gboolean with_capture = GPOINTER_TO_UINT (data) & 1;
+  gboolean release_second_first = GPOINTER_TO_UINT (data) & 2;
+  GtkWidget *window = gtk_window_new ();
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  GtkWidget *a = gtk_button_new_with_label ("a");
+  GtkWidget *b = gtk_button_new_with_label ("b");
+  guint a_count = 0, b_count = 0;
+  double ax, ay, bx, by;
+
+  gtk_widget_set_size_request (a, 80, 60);
+  gtk_widget_set_size_request (b, 80, 60);
+  gtk_box_append (GTK_BOX (box), a);
+  gtk_box_append (GTK_BOX (box), b);
+  if (with_capture)
+    {
+      GtkGesture *haptic = gtk_gesture_click_new ();
+      gtk_event_controller_set_propagation_phase (GTK_EVENT_CONTROLLER (haptic), GTK_PHASE_CAPTURE);
+      gtk_widget_add_controller (box, GTK_EVENT_CONTROLLER (haptic));
+    }
+  gtk_window_set_child (GTK_WINDOW (window), box);
+  g_signal_connect (a, "clicked", G_CALLBACK (count_clicked_cb), &a_count);
+  g_signal_connect (b, "clicked", G_CALLBACK (count_clicked_cb), &b_count);
+  show_toplevel (GTK_WINDOW (window));
+  while (gtk_widget_get_width (b) <= 0)
+    g_main_context_iteration (NULL, TRUE);
+  button_center (a, &ax, &ay);
+  button_center (b, &bx, &by);
+
+  touch_state[0] = (PointState) { 0 };
+  touch_state[1] = (PointState) { 0 };
+  touch_state[0].x = ax; touch_state[0].y = ay;
+  touch_state[1].x = bx; touch_state[1].y = by;
+  point_press (&touch_state[0], window, 1);
+  point_press (&touch_state[1], window, 1);
+  if (release_second_first)
+    {
+      point_release (&touch_state[1], 1);
+      point_release (&touch_state[0], 1);
+    }
+  else
+    {
+      point_release (&touch_state[0], 1);
+      point_release (&touch_state[1], 1);
+    }
+  g_test_message ("a clicked %u, b clicked %u", a_count, b_count);
+  g_assert_cmpuint (a_count, ==, 1);
+  g_assert_cmpuint (b_count, ==, 1);
+
+  touch_state[0] = (PointState) { 0 };
+  touch_state[1] = (PointState) { 0 };
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1732,6 +1810,10 @@ main (int argc, char *argv[])
   g_test_add_data_func ("/gestures/swipe/pointer/grouped", GUINT_TO_POINTER (3), test_swipe_cancel);
   g_test_add_data_func ("/gestures/swipe/pointer/claimed", GUINT_TO_POINTER (2), test_swipe_cancel);
   g_test_add_func ("/gestures/click/touch-hold-secondary", test_touch_hold_secondary);
+  g_test_add_data_func ("/gestures/click/rolling-touch/plain", GUINT_TO_POINTER (0), test_rolling_touch_buttons);
+  g_test_add_data_func ("/gestures/click/rolling-touch/capture", GUINT_TO_POINTER (1), test_rolling_touch_buttons);
+  g_test_add_data_func ("/gestures/click/rolling-touch/plain-reversed", GUINT_TO_POINTER (2), test_rolling_touch_buttons);
+  g_test_add_data_func ("/gestures/click/rolling-touch/capture-reversed", GUINT_TO_POINTER (3), test_rolling_touch_buttons);
 #if 0
   g_test_add_func ("/gestures/grabs/gestures-outside-grab", test_gestures_outside_grab);
   g_test_add_func ("/gestures/grabs/gestures-inside-grab", test_gestures_inside_grab);
