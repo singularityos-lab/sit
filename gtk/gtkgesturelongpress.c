@@ -46,6 +46,8 @@
 #include "gtkdragsourceprivate.h"
 #include "gtkprivate.h"
 #include "gtkmarshalers.h"
+#include "gtkpopoverprivate.h"
+#include "gtknative.h"
 
 typedef struct _GtkGestureLongPressPrivate GtkGestureLongPressPrivate;
 
@@ -111,6 +113,14 @@ _gtk_gesture_long_press_timeout (gpointer user_data)
 
   priv->timeout_id = 0;
   priv->triggered = TRUE;
+  if (sequence != NULL)
+    {
+      GtkWidget *widget = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture));
+      GtkNative *native = widget ? gtk_widget_get_native (widget) : NULL;
+
+      if (native)
+        gtk_popover_offer_touch_slide (gtk_native_get_surface (native), sequence);
+    }
   g_signal_emit (gesture, signals[PRESSED], 0, x, y);
 
   return G_SOURCE_REMOVE;
@@ -193,6 +203,7 @@ gtk_gesture_long_press_end (GtkGesture       *gesture,
       g_signal_emit (gesture, signals[CANCELLED], 0);
     }
 
+  gtk_popover_withdraw_touch_slide (sequence);
   priv->cancelled = priv->triggered = FALSE;
 }
 

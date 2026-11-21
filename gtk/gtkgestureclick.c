@@ -35,6 +35,8 @@
 #include "gtkgestureclickprivate.h"
 #include "gtkprivate.h"
 #include "gtkmarshalers.h"
+#include "gtkpopoverprivate.h"
+#include "gtknative.h"
 
 typedef struct _GtkGestureClickPrivate GtkGestureClickPrivate;
 
@@ -110,6 +112,8 @@ _gtk_gesture_click_stop (GtkGestureClick *gesture)
   priv = gtk_gesture_click_get_instance_private (gesture);
 
   g_clear_handle_id (&priv->hold_timeout_id, g_source_remove);
+  if (priv->holding)
+    gtk_popover_withdraw_touch_slide (gtk_gesture_single_get_current_sequence (GTK_GESTURE_SINGLE (gesture)));
   priv->holding = FALSE;
   priv->hold_fired = FALSE;
 
@@ -157,6 +161,13 @@ _hold_timeout_cb (gpointer user_data)
   priv->n_presses = 1;
   priv->n_release = 1;
   g_object_ref (click);
+  {
+    GtkWidget *widget = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (click));
+    GtkNative *native = widget ? gtk_widget_get_native (widget) : NULL;
+
+    if (native)
+      gtk_popover_offer_touch_slide (gtk_native_get_surface (native), current);
+  }
   g_signal_emit (click, signals[PRESSED], 0, 1, x, y);
 
   if (priv->hold_fired &&

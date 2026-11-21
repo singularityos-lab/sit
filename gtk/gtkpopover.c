@@ -127,6 +127,7 @@
 #include "gtkwidgetprivate.h"
 #include "gtkeventcontrollerkey.h"
 #include "gtkeventcontrollerfocus.h"
+#include "gtkeventcontrollerlegacy.h"
 #include "gtkbinlayout.h"
 #include "gtkenums.h"
 #include "gtktypebuiltins.h"
@@ -191,7 +192,12 @@ typedef struct {
   GdkPopupLayout *layout;
   GdkRectangle final_rect;
   GtkPositionType final_position;
+
+  GdkSurface *slide_surface;
+  GdkEventSequence *slide_sequence;
+  GtkWidget *slide_hot;
 } GtkPopoverPrivate;
+
 
 enum {
   CLOSED,
@@ -229,11 +235,135 @@ G_DEFINE_TYPE_WITH_CODE (GtkPopover, gtk_popover, GTK_TYPE_WIDGET,
                          G_IMPLEMENT_INTERFACE (GTK_TYPE_NATIVE,
                                                 gtk_popover_native_interface_init))
 
+static GdkSurface *offered_slide_surface;
+static GdkEventSequence *offered_slide_sequence;
+
+void
+gtk_popover_offer_touch_slide (GdkSurface       *surface,
+                               GdkEventSequence *sequence)
+{
+  if (surface == NULL || sequence == NULL)
+    return;
+
+  g_set_weak_pointer (&offered_slide_surface, surface);
+  offered_slide_sequence = sequence;
+}
+
+void
+gtk_popover_withdraw_touch_slide (GdkEventSequence *sequence)
+{
+  if (sequence == NULL || offered_slide_sequence != sequence)
+    return;
+
+  g_clear_weak_pointer (&offered_slide_surface);
+  offered_slide_sequence = NULL;
+}
+
+static void
+gtk_popover_set_slide_hot (GtkPopover *popover,
+                           GtkWidget  *hot)
+{
+  GtkPopoverPrivate *priv = gtk_popover_get_instance_private (popover);
+
+  if (priv->slide_hot == hot)
+    return;
+
+  if (priv->slide_hot)
+    gtk_widget_unset_state_flags (priv->slide_hot, GTK_STATE_FLAG_PRELIGHT);
+
+  g_set_weak_pointer (&priv->slide_hot, hot);
+
+  if (hot)
+    gtk_widget_set_state_flags (hot, GTK_STATE_FLAG_PRELIGHT, FALSE);
+}
+
+static void
+gtk_popover_end_slide (GtkPopover *popover)
+{
+  GtkPopoverPrivate *priv = gtk_popover_get_instance_private (popover);
+
+  gtk_popover_set_slide_hot (popover, NULL);
+  g_clear_weak_pointer (&priv->slide_surface);
+  priv->slide_sequence = NULL;
+}
+
+static GtkWidget *
+gtk_popover_slide_target (GtkPopover *popover,
+                          GdkEvent   *event)
+{
+  GtkPopoverPrivate *priv = gtk_popover_get_instance_private (popover);
+  GtkWidget *widget = GTK_WIDGET (popover);
+  GtkWidget *picked;
+  double x, y, tx, ty;
+
+  if (priv->surface == NULL || !gdk_event_get_position (event, &x, &y))
+    return NULL;
+
+  x -= gdk_popup_get_position_x (GDK_POPUP (priv->surface));
+  y -= gdk_popup_get_position_y (GDK_POPUP (priv->surface));
+  gtk_native_get_surface_transform (GTK_NATIVE (popover), &tx, &ty);
+  x -= tx;
+  y -= ty;
+
+  for (picked = gtk_widget_pick (widget, x, y, GTK_PICK_DEFAULT);
+       picked != NULL && picked != widget;
+       picked = gtk_widget_get_parent (picked))
+    {
+      if (gtk_widget_class_get_activate_signal (GTK_WIDGET_GET_CLASS (picked)) != 0 &&
+          gtk_widget_is_sensitive (picked))
+        return picked;
+    }
+
+  return NULL;
+}
+
+static gboolean
+gtk_popover_slide_event (GtkEventControllerLegacy *controller,
+                         GdkEvent                 *event,
+                         GtkPopover               *popover)
+{
+  GtkPopoverPrivate *priv = gtk_popover_get_instance_private (popover);
+  GdkEventType type = gdk_event_get_event_type (event);
+  GtkWidget *hot;
+
+  if (priv->slide_sequence == NULL ||
+      gdk_event_get_event_sequence (event) != priv->slide_sequence ||
+      gdk_event_get_surface (event) != priv->slide_surface)
+    return FALSE;
+
+  switch ((guint) type)
+    {
+    case GDK_TOUCH_UPDATE:
+      gtk_popover_set_slide_hot (popover, gtk_popover_slide_target (popover, event));
+      return TRUE;
+
+    case GDK_TOUCH_END:
+      hot = gtk_popover_slide_target (popover, event);
+      if (hot)
+        g_object_ref (hot);
+      gtk_popover_end_slide (popover);
+      if (hot)
+        {
+          gtk_widget_activate (hot);
+          g_object_unref (hot);
+        }
+      return TRUE;
+
+    case GDK_TOUCH_CANCEL:
+      gtk_popover_end_slide (popover);
+      return TRUE;
+
+    default:
+      return FALSE;
+    }
+}
+
 
 static GdkSurface *
 gtk_popover_native_get_surface (GtkNative *native)
 {
   GtkPopover *popover = GTK_POPOVER (native);
+
   GtkPopoverPrivate *priv = gtk_popover_get_instance_private (popover);
 
   return priv->surface;
@@ -1025,6 +1155,11 @@ gtk_popover_init (GtkPopover *popover)
   g_signal_connect_swapped (controller, "key-released", G_CALLBACK (gtk_popover_key_released), popover);
   gtk_widget_add_controller (GTK_WIDGET (popover), controller);
 
+  controller = gtk_event_controller_legacy_new ();
+  gtk_event_controller_set_propagation_phase (controller, GTK_PHASE_CAPTURE);
+  g_signal_connect (controller, "event", G_CALLBACK (gtk_popover_slide_event), popover);
+  gtk_widget_add_controller (widget, controller);
+
   controller = gtk_event_controller_focus_new ();
   g_signal_connect_swapped (controller, "enter", G_CALLBACK (gtk_popover_focus_in), popover);
   g_signal_connect_swapped (controller, "leave", G_CALLBACK (gtk_popover_focus_out), popover);
@@ -1210,6 +1345,16 @@ gtk_popover_map (GtkWidget *widget)
   present_popup (popover);
 
   parent = gtk_widget_get_parent (widget);
+  gtk_popover_end_slide (popover);
+  if (offered_slide_sequence != NULL && offered_slide_surface != NULL &&
+      gtk_widget_get_native (parent) != NULL &&
+      gtk_native_get_surface (gtk_widget_get_native (parent)) == offered_slide_surface)
+    {
+      g_set_weak_pointer (&priv->slide_surface, offered_slide_surface);
+      priv->slide_sequence = offered_slide_sequence;
+      g_clear_weak_pointer (&offered_slide_surface);
+      offered_slide_sequence = NULL;
+    }
   priv->surface_transform_changed_cb =
     gtk_widget_add_surface_transform_changed_callback (parent,
                                                        surface_transform_changed_cb,
@@ -1232,6 +1377,7 @@ gtk_popover_unmap (GtkWidget *widget)
   if (priv->autohide)
     gtk_grab_remove (widget);
 
+  gtk_popover_end_slide (popover);
   parent = gtk_widget_get_parent (widget);
   gtk_widget_remove_surface_transform_changed_callback (parent,
                                                         priv->surface_transform_changed_cb);
@@ -1248,6 +1394,7 @@ gtk_popover_dispose (GObject *object)
   GtkPopover *popover = GTK_POPOVER (object);
   GtkPopoverPrivate *priv = gtk_popover_get_instance_private (popover);
 
+  gtk_popover_end_slide (popover);
   g_clear_object (&priv->default_widget);
   g_clear_pointer (&priv->contents_widget, gtk_widget_unparent);
   g_clear_pointer (&priv->arrow_render_node, gsk_render_node_unref);

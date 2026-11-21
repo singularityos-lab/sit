@@ -23,5 +23,9 @@ G_BEGIN_DECLS
 
 GtkWidget *gtk_popover_get_contents_widget (GtkPopover *popover);
 
+void gtk_popover_offer_touch_slide    (GdkSurface       *surface,
+                                       GdkEventSequence *sequence);
+void gtk_popover_withdraw_touch_slide (GdkEventSequence *sequence);
+
 G_END_DECLS
 

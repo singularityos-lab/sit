@@ -1713,6 +1713,132 @@ test_touch_hold_secondary (void)
   gtk_window_destroy (GTK_WINDOW (window));
 }
 
+typedef struct {
+  GtkWidget *popover;
+  guint first_clicked;
+  guint second_clicked;
+} SlideData;
+
+static void
+slide_first_cb (GtkButton *button, SlideData *data)
+{
+  data->first_clicked++;
+}
+
+static void
+slide_second_cb (GtkButton *button, SlideData *data)
+{
+  data->second_clicked++;
+}
+
+static void
+slide_open_cb (GtkGestureClick *gesture, int n_press, double x, double y, SlideData *data)
+{
+  GdkRectangle rect = { (int) x, (int) y, 1, 1 };
+
+  gtk_popover_set_pointing_to (GTK_POPOVER (data->popover), &rect);
+  gtk_popover_popup (GTK_POPOVER (data->popover));
+}
+
+static void
+wait_popover_shown (GtkWidget *popover)
+{
+  GdkSurface *surface;
+  int i;
+
+  for (i = 0; i < 400; i++)
+    {
+      surface = gtk_native_get_surface (GTK_NATIVE (popover));
+      if (gtk_widget_get_mapped (popover) && surface != NULL &&
+          gdk_surface_get_width (surface) > 1 && gdk_surface_get_height (surface) > 1)
+        break;
+      wait_ms (5);
+    }
+  wait_ms (50);
+}
+
+static void
+popover_point_in_parent (GtkWidget *popover,
+                         GtkWidget *target,
+                         double    *x,
+                         double    *y)
+{
+  graphene_point_t center, local;
+  GdkSurface *surface = gtk_native_get_surface (GTK_NATIVE (popover));
+  double tx, ty;
+
+  center = GRAPHENE_POINT_INIT (gtk_widget_get_width (target) / 2.0, gtk_widget_get_height (target) / 2.0);
+  g_assert_true (gtk_widget_compute_point (target, popover, &center, &local));
+  gtk_native_get_surface_transform (GTK_NATIVE (popover), &tx, &ty);
+  *x = gdk_popup_get_position_x (GDK_POPUP (surface)) + tx + local.x;
+  *y = gdk_popup_get_position_y (GDK_POPUP (surface)) + ty + local.y;
+}
+
+static void
+test_touch_hold_slide (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  GtkGesture *menu = gtk_gesture_click_new ();
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *first = gtk_button_new_with_label ("First");
+  GtkWidget *second = gtk_button_new_with_label ("Second");
+  PointState *point = &touch_state[0];
+  SlideData data = { 0 };
+  guint long_press_time;
+  double x, y;
+
+  g_object_get (gtk_widget_get_settings (window), "gtk-long-press-time", &long_press_time, NULL);
+  gtk_window_set_default_size (GTK_WINDOW (window), 320, 320);
+  data.popover = gtk_popover_new ();
+  gtk_popover_set_has_arrow (GTK_POPOVER (data.popover), FALSE);
+  gtk_popover_set_position (GTK_POPOVER (data.popover), GTK_POS_BOTTOM);
+  gtk_widget_set_size_request (first, 160, 48);
+  gtk_widget_set_size_request (second, 160, 48);
+  gtk_box_append (GTK_BOX (box), first);
+  gtk_box_append (GTK_BOX (box), second);
+  gtk_popover_set_child (GTK_POPOVER (data.popover), box);
+  gtk_widget_set_parent (data.popover, window);
+  g_signal_connect (first, "clicked", G_CALLBACK (slide_first_cb), &data);
+  g_signal_connect (second, "clicked", G_CALLBACK (slide_second_cb), &data);
+  gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (menu), GDK_BUTTON_SECONDARY);
+  gtk_widget_add_controller (window, GTK_EVENT_CONTROLLER (menu));
+  g_signal_connect (menu, "pressed", G_CALLBACK (slide_open_cb), &data);
+  show_toplevel (GTK_WINDOW (window));
+
+  *point = (PointState) { 0 };
+  point_update (point, window, 60, 40);
+  point_press (point, window, 1);
+  wait_ms (long_press_time + 100);
+  wait_popover_shown (data.popover);
+  g_assert_true (gtk_widget_get_mapped (data.popover));
+  point_release (point, 1);
+  wait_ms (400);
+  g_assert_cmpuint (data.first_clicked, ==, 0);
+  g_assert_cmpuint (data.second_clicked, ==, 0);
+  g_assert_true (gtk_widget_get_visible (data.popover));
+  gtk_popover_popdown (GTK_POPOVER (data.popover));
+  wait_ms (50);
+
+  *point = (PointState) { 0 };
+  point_update (point, window, 60, 40);
+  point_press (point, window, 1);
+  wait_ms (long_press_time + 100);
+  wait_popover_shown (data.popover);
+  popover_point_in_parent (data.popover, second, &x, &y);
+  point_update (point, window, x, y);
+  g_assert_true (gtk_widget_get_state_flags (second) & GTK_STATE_FLAG_PRELIGHT);
+  g_assert_false (gtk_widget_get_state_flags (first) & GTK_STATE_FLAG_PRELIGHT);
+  point_release (point, 1);
+  wait_ms (400);
+  g_assert_cmpuint (data.first_clicked, ==, 0);
+  g_assert_cmpuint (data.second_clicked, ==, 1);
+  g_assert_false (gtk_widget_get_state_flags (second) & GTK_STATE_FLAG_PRELIGHT);
+
+  *point = (PointState) { 0 };
+  gtk_widget_unparent (data.popover);
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
 static void
 count_clicked_cb (GtkButton *button, guint *count)
 {
@@ -1810,6 +1936,7 @@ main (int argc, char *argv[])
   g_test_add_data_func ("/gestures/swipe/pointer/grouped", GUINT_TO_POINTER (3), test_swipe_cancel);
   g_test_add_data_func ("/gestures/swipe/pointer/claimed", GUINT_TO_POINTER (2), test_swipe_cancel);
   g_test_add_func ("/gestures/click/touch-hold-secondary", test_touch_hold_secondary);
+  g_test_add_func ("/gestures/click/touch-hold-slide", test_touch_hold_slide);
   g_test_add_data_func ("/gestures/click/rolling-touch/plain", GUINT_TO_POINTER (0), test_rolling_touch_buttons);
   g_test_add_data_func ("/gestures/click/rolling-touch/capture", GUINT_TO_POINTER (1), test_rolling_touch_buttons);
   g_test_add_data_func ("/gestures/click/rolling-touch/plain-reversed", GUINT_TO_POINTER (2), test_rolling_touch_buttons);
