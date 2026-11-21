@@ -47,6 +47,9 @@ struct _GtkGestureClickPrivate
   guint n_presses;
   guint n_release;
   guint current_button;
+  guint hold_timeout_id;
+  guint holding : 1;
+  guint hold_fired : 1;
 };
 
 enum {
@@ -76,6 +79,8 @@ gtk_gesture_click_finalize (GObject *object)
       priv->double_click_timeout_id = 0;
     }
 
+  g_clear_handle_id (&priv->hold_timeout_id, g_source_remove);
+
   G_OBJECT_CLASS (gtk_gesture_click_parent_class)->finalize (object);
 }
 
@@ -104,6 +109,10 @@ _gtk_gesture_click_stop (GtkGestureClick *gesture)
 
   priv = gtk_gesture_click_get_instance_private (gesture);
 
+  g_clear_handle_id (&priv->hold_timeout_id, g_source_remove);
+  priv->holding = FALSE;
+  priv->hold_fired = FALSE;
+
   if (priv->n_presses == 0)
     return;
 
@@ -125,6 +134,65 @@ _double_click_timeout_cb (gpointer user_data)
   _gtk_gesture_click_stop (gesture);
 
   return FALSE;
+}
+
+static gboolean
+_hold_timeout_cb (gpointer user_data)
+{
+  GtkGestureClick *click = user_data;
+  GtkGesture *gesture = GTK_GESTURE (click);
+  GtkGestureClickPrivate *priv;
+  GdkEventSequence *current;
+  double x, y;
+
+  priv = gtk_gesture_click_get_instance_private (click);
+  priv->hold_timeout_id = 0;
+  current = gtk_gesture_single_get_current_sequence (GTK_GESTURE_SINGLE (click));
+
+  if (!gtk_gesture_handles_sequence (gesture, current) ||
+      !gtk_gesture_get_point (gesture, current, &x, &y))
+    return G_SOURCE_REMOVE;
+
+  priv->hold_fired = TRUE;
+  priv->n_presses = 1;
+  priv->n_release = 1;
+  g_object_ref (click);
+  g_signal_emit (click, signals[PRESSED], 0, 1, x, y);
+
+  if (priv->hold_fired &&
+      gtk_gesture_handles_sequence (gesture, current) &&
+      gtk_gesture_get_sequence_state (gesture, current) == GTK_EVENT_SEQUENCE_NONE)
+    gtk_gesture_set_state (gesture, GTK_EVENT_SEQUENCE_CLAIMED);
+
+  g_object_unref (click);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+_gtk_gesture_click_begin_hold (GtkGestureClick  *click,
+                               GdkDevice        *device,
+                               GdkEventSequence *current)
+{
+  GtkGestureClickPrivate *priv;
+  GtkWidget *widget;
+  guint delay;
+
+  priv = gtk_gesture_click_get_instance_private (click);
+  _gtk_gesture_click_stop (click);
+  g_clear_handle_id (&priv->double_click_timeout_id, g_source_remove);
+
+  widget = gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (click));
+  g_object_get (gtk_widget_get_settings (widget), "gtk-long-press-time", &delay, NULL);
+
+  priv->current_device = device;
+  priv->current_button = GDK_BUTTON_SECONDARY;
+  gtk_gesture_get_point (GTK_GESTURE (click), current,
+                         &priv->initial_press_x, &priv->initial_press_y);
+  priv->holding = TRUE;
+  priv->hold_fired = FALSE;
+  priv->hold_timeout_id = g_timeout_add (delay, _hold_timeout_cb, click);
+  gdk_source_set_static_name_by_id (priv->hold_timeout_id, "[gtk] _hold_timeout_cb");
 }
 
 static void
@@ -200,6 +268,12 @@ gtk_gesture_click_begin (GtkGesture       *gesture,
 
   if (event_type == GDK_BUTTON_PRESS)
     button = gdk_button_event_get_button (event);
+  else if (event_type == GDK_TOUCH_BEGIN &&
+           gtk_gesture_single_get_button (GTK_GESTURE_SINGLE (gesture)) == GDK_BUTTON_SECONDARY)
+    {
+      _gtk_gesture_click_begin_hold (click, device, current);
+      return;
+    }
   else if (event_type == GDK_TOUCH_BEGIN)
     button = 1;
   else
@@ -243,12 +317,29 @@ gtk_gesture_click_update (GtkGesture       *gesture,
                           GdkEventSequence *sequence)
 {
   GtkGestureClick *click;
+  GtkGestureClickPrivate *priv;
   GdkEventSequence *current;
   double x, y;
 
   click = GTK_GESTURE_CLICK (gesture);
+  priv = gtk_gesture_click_get_instance_private (click);
   current = gtk_gesture_single_get_current_sequence (GTK_GESTURE_SINGLE (gesture));
   gtk_gesture_get_point (gesture, current, &x, &y);
+
+  if (priv->holding && !priv->hold_fired)
+    {
+      guint threshold;
+
+      g_object_get (gtk_widget_get_settings (gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture))),
+                    "gtk-dnd-drag-threshold", &threshold, NULL);
+      if (ABS (priv->initial_press_x - x) >= threshold ||
+          ABS (priv->initial_press_y - y) >= threshold)
+        {
+          _gtk_gesture_click_stop (click);
+          gtk_gesture_set_state (gesture, GTK_EVENT_SEQUENCE_DENIED);
+        }
+      return;
+    }
 
   if (!_gtk_gesture_click_check_within_threshold (click, "gtk-dnd-drag-threshold", x, y))
     _gtk_gesture_click_stop (click);
@@ -270,6 +361,20 @@ gtk_gesture_click_end (GtkGesture       *gesture,
   current = gtk_gesture_single_get_current_sequence (GTK_GESTURE_SINGLE (gesture));
   interpreted = gtk_gesture_get_point (gesture, current, &x, &y);
   state = gtk_gesture_get_sequence_state (gesture, current);
+
+  if (priv->holding)
+    {
+      gboolean fired = priv->hold_fired;
+
+      g_clear_handle_id (&priv->hold_timeout_id, g_source_remove);
+      priv->holding = FALSE;
+      priv->hold_fired = FALSE;
+      if (fired && current == sequence && state != GTK_EVENT_SEQUENCE_DENIED && interpreted)
+        g_signal_emit (gesture, signals[RELEASED], 0, priv->n_release, x, y);
+      priv->n_release = 0;
+      _gtk_gesture_click_stop (click);
+      return;
+    }
 
   if (current == sequence && state != GTK_EVENT_SEQUENCE_DENIED && interpreted)
     g_signal_emit (gesture, signals[RELEASED], 0, priv->n_release, x, y);

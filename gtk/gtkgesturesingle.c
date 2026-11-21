@@ -39,6 +39,7 @@
 #include "config.h"
 #include "gtkgesturesingle.h"
 #include "gtkgesturesingleprivate.h"
+#include "gtkgestureclick.h"
 #include "gtkprivate.h"
 #include "gtkdebug.h"
 
@@ -160,7 +161,10 @@ gtk_gesture_single_handle_event (GtkEventController *controller,
         return FALSE;
 
       sequence = gdk_event_get_event_sequence (event);
-      button = 1;
+      if (GTK_IS_GESTURE_CLICK (controller) && priv->button == GDK_BUTTON_SECONDARY)
+        button = GDK_BUTTON_SECONDARY;
+      else
+        button = 1;
       break;
     case GDK_BUTTON_PRESS:
     case GDK_BUTTON_RELEASE:

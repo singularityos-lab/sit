@@ -1614,6 +1614,105 @@ test_swipe_cancel (gconstpointer data)
   gtk_window_destroy (GTK_WINDOW (window));
 }
 
+typedef struct {
+  guint secondary_pressed;
+  guint secondary_released;
+  guint primary_released;
+} HoldData;
+
+static void
+hold_pressed_cb (GtkGestureClick *gesture, int n_press, double x, double y, HoldData *data)
+{
+  data->secondary_pressed++;
+}
+
+static void
+hold_released_cb (GtkGestureClick *gesture, int n_press, double x, double y, HoldData *data)
+{
+  data->secondary_released++;
+}
+
+static void
+tap_released_cb (GtkGestureClick *gesture, int n_press, double x, double y, HoldData *data)
+{
+  data->primary_released++;
+}
+
+static gboolean
+wait_done_cb (gpointer user_data)
+{
+  *(gboolean *) user_data = TRUE;
+  return G_SOURCE_REMOVE;
+}
+
+static void
+wait_ms (guint ms)
+{
+  gboolean done = FALSE;
+
+  g_timeout_add (ms, wait_done_cb, &done);
+  while (!done)
+    g_main_context_iteration (NULL, TRUE);
+}
+
+static void
+test_touch_hold_secondary (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  GtkGesture *menu = gtk_gesture_click_new ();
+  GtkGesture *tap = gtk_gesture_click_new ();
+  PointState *point = &touch_state[0];
+  HoldData data = { 0 };
+  guint long_press_time;
+
+  g_object_get (gtk_widget_get_settings (window), "gtk-long-press-time", &long_press_time, NULL);
+  gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (menu), GDK_BUTTON_SECONDARY);
+  gtk_window_set_default_size (GTK_WINDOW (window), 240, 200);
+  gtk_widget_add_controller (window, GTK_EVENT_CONTROLLER (menu));
+  gtk_widget_add_controller (window, GTK_EVENT_CONTROLLER (tap));
+  g_signal_connect (menu, "pressed", G_CALLBACK (hold_pressed_cb), &data);
+  g_signal_connect (menu, "released", G_CALLBACK (hold_released_cb), &data);
+  g_signal_connect (tap, "released", G_CALLBACK (tap_released_cb), &data);
+  show_toplevel (GTK_WINDOW (window));
+
+  *point = (PointState) { 0 };
+  point_update (point, window, 80, 80);
+  point_press (point, window, 1);
+  wait_ms (long_press_time / 2);
+  g_assert_cmpuint (data.secondary_pressed, ==, 0);
+  point_release (point, 1);
+  g_assert_cmpuint (data.secondary_pressed, ==, 0);
+  g_assert_cmpuint (data.primary_released, ==, 1);
+
+  wait_ms (long_press_time);
+  point_update (point, window, 80, 80);
+  point_press (point, window, 1);
+  wait_ms (long_press_time + 100);
+  g_assert_cmpuint (data.secondary_pressed, ==, 1);
+  point_release (point, 1);
+  g_assert_cmpuint (data.secondary_released, ==, 1);
+  g_assert_cmpuint (data.primary_released, ==, 1);
+
+  wait_ms (long_press_time);
+  point_update (point, window, 80, 80);
+  point_press (point, window, 1);
+  point_update (point, window, 140, 80);
+  wait_ms (long_press_time + 100);
+  g_assert_cmpuint (data.secondary_pressed, ==, 1);
+  point_release (point, 1);
+
+  wait_ms (long_press_time);
+  point_update (&mouse_state, window, 80, 80);
+  point_press (&mouse_state, window, GDK_BUTTON_SECONDARY);
+  g_assert_cmpuint (data.secondary_pressed, ==, 2);
+  point_release (&mouse_state, GDK_BUTTON_SECONDARY);
+  g_assert_cmpuint (data.secondary_released, ==, 2);
+
+  *point = (PointState) { 0 };
+  mouse_state = (PointState) { 0 };
+  gtk_window_destroy (GTK_WINDOW (window));
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1632,6 +1731,7 @@ main (int argc, char *argv[])
   g_test_add_data_func ("/gestures/swipe/touch/claimed", GUINT_TO_POINTER (0), test_swipe_cancel);
   g_test_add_data_func ("/gestures/swipe/pointer/grouped", GUINT_TO_POINTER (3), test_swipe_cancel);
   g_test_add_data_func ("/gestures/swipe/pointer/claimed", GUINT_TO_POINTER (2), test_swipe_cancel);
+  g_test_add_func ("/gestures/click/touch-hold-secondary", test_touch_hold_secondary);
 #if 0
   g_test_add_func ("/gestures/grabs/gestures-outside-grab", test_gestures_outside_grab);
   g_test_add_func ("/gestures/grabs/gestures-inside-grab", test_gestures_inside_grab);
