@@ -341,10 +341,12 @@ gtk_gesture_click_update (GtkGesture       *gesture,
     {
       guint threshold;
 
+      double slop;
+
       g_object_get (gtk_widget_get_settings (gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (gesture))),
                     "gtk-dnd-drag-threshold", &threshold, NULL);
-      if (ABS (priv->initial_press_x - x) >= threshold ||
-          ABS (priv->initial_press_y - y) >= threshold)
+      slop = threshold * 1.5;
+      if (hypot (priv->initial_press_x - x, priv->initial_press_y - y) > slop)
         {
           _gtk_gesture_click_stop (click);
           gtk_gesture_set_state (gesture, GTK_EVENT_SEQUENCE_DENIED);

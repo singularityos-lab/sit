@@ -1713,6 +1713,124 @@ test_touch_hold_secondary (void)
   gtk_window_destroy (GTK_WINDOW (window));
 }
 
+static guint
+probe_hold (GtkWidget *window, GtkWidget *target, double jitter)
+{
+  GtkGesture *menu = gtk_gesture_click_new ();
+  PointState *point = &touch_state[0];
+  HoldData data = { 0 };
+  guint long_press_time;
+  graphene_point_t center, at;
+
+  g_object_get (gtk_widget_get_settings (window), "gtk-long-press-time", &long_press_time, NULL);
+  gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (menu), GDK_BUTTON_SECONDARY);
+  gtk_widget_add_controller (target, GTK_EVENT_CONTROLLER (menu));
+  g_signal_connect (menu, "pressed", G_CALLBACK (hold_pressed_cb), &data);
+  show_toplevel (GTK_WINDOW (window));
+  wait_ms (100);
+  center = GRAPHENE_POINT_INIT (gtk_widget_get_width (target) / 2.0, gtk_widget_get_height (target) / 2.0);
+  g_assert_true (gtk_widget_compute_point (target, window, &center, &at));
+  *point = (PointState) { 0 };
+  point_update (point, window, at.x, at.y);
+  point_press (point, window, 1);
+  if (jitter > 0)
+    {
+      wait_ms (60);
+      point_update (point, window, at.x + jitter, at.y + jitter / 2);
+      wait_ms (60);
+      point_update (point, window, at.x - jitter / 2, at.y + jitter);
+    }
+  wait_ms (long_press_time + 150);
+  point_release (point, 1);
+  *point = (PointState) { 0 };
+  gtk_window_destroy (GTK_WINDOW (window));
+  return data.secondary_pressed;
+}
+
+static void
+test_touch_hold_over_button (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  GtkWidget *button = gtk_button_new_with_label ("Item");
+
+  gtk_window_set_default_size (GTK_WINDOW (window), 240, 200);
+  gtk_widget_set_size_request (button, 160, 60);
+  gtk_box_append (GTK_BOX (box), button);
+  gtk_window_set_child (GTK_WINDOW (window), box);
+  g_assert_cmpuint (probe_hold (window, box, 0), ==, 1);
+}
+
+static void
+test_touch_hold_list_row (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  GtkWidget *scroll = gtk_scrolled_window_new ();
+  GtkWidget *list = gtk_list_box_new ();
+  GtkWidget *label = NULL;
+  int i;
+
+  gtk_window_set_default_size (GTK_WINDOW (window), 240, 200);
+  for (i = 0; i < 20; i++)
+    {
+      GtkWidget *l = gtk_label_new ("Row");
+      gtk_widget_set_size_request (l, -1, 48);
+      gtk_list_box_append (GTK_LIST_BOX (list), l);
+      if (i == 1)
+        label = l;
+    }
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroll), list);
+  gtk_window_set_child (GTK_WINDOW (window), scroll);
+  g_assert_cmpuint (probe_hold (window, label, 0), ==, 1);
+}
+
+static void
+probe_setup_item (GtkSignalListItemFactory *f, GtkListItem *item, gpointer data)
+{
+  GtkWidget *l = gtk_label_new ("Item");
+  gtk_widget_set_size_request (l, -1, 48);
+  gtk_list_item_set_child (item, l);
+}
+
+static void
+test_touch_hold_list_view (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  GtkWidget *scroll = gtk_scrolled_window_new ();
+  GtkStringList *model = gtk_string_list_new (NULL);
+  GtkListItemFactory *factory = gtk_signal_list_item_factory_new ();
+  GtkWidget *view;
+  int i;
+
+  for (i = 0; i < 20; i++)
+    gtk_string_list_append (model, "x");
+  g_signal_connect (factory, "setup", G_CALLBACK (probe_setup_item), NULL);
+  view = gtk_list_view_new (GTK_SELECTION_MODEL (gtk_single_selection_new (G_LIST_MODEL (model))), factory);
+  gtk_window_set_default_size (GTK_WINDOW (window), 240, 200);
+  gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (scroll), view);
+  gtk_window_set_child (GTK_WINDOW (window), scroll);
+  g_assert_cmpuint (probe_hold (window, view, 0), ==, 1);
+}
+
+static void
+test_touch_hold_jitter (void)
+{
+  GtkWidget *window = gtk_window_new ();
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+
+  gtk_window_set_default_size (GTK_WINDOW (window), 240, 200);
+  gtk_widget_set_size_request (box, 200, 150);
+  gtk_window_set_child (GTK_WINDOW (window), box);
+  g_assert_cmpuint (probe_hold (window, box, 9), ==, 1);
+
+  window = gtk_window_new ();
+  box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_window_set_default_size (GTK_WINDOW (window), 240, 200);
+  gtk_widget_set_size_request (box, 200, 150);
+  gtk_window_set_child (GTK_WINDOW (window), box);
+  g_assert_cmpuint (probe_hold (window, box, 24), ==, 0);
+}
+
 typedef struct {
   GtkWidget *popover;
   guint first_clicked;
@@ -1937,6 +2055,10 @@ main (int argc, char *argv[])
   g_test_add_data_func ("/gestures/swipe/pointer/claimed", GUINT_TO_POINTER (2), test_swipe_cancel);
   g_test_add_func ("/gestures/click/touch-hold-secondary", test_touch_hold_secondary);
   g_test_add_func ("/gestures/click/touch-hold-slide", test_touch_hold_slide);
+  g_test_add_func ("/gestures/click/touch-hold-over-button", test_touch_hold_over_button);
+  g_test_add_func ("/gestures/click/touch-hold-list-row", test_touch_hold_list_row);
+  g_test_add_func ("/gestures/click/touch-hold-list-view", test_touch_hold_list_view);
+  g_test_add_func ("/gestures/click/touch-hold-jitter", test_touch_hold_jitter);
   g_test_add_data_func ("/gestures/click/rolling-touch/plain", GUINT_TO_POINTER (0), test_rolling_touch_buttons);
   g_test_add_data_func ("/gestures/click/rolling-touch/capture", GUINT_TO_POINTER (1), test_rolling_touch_buttons);
   g_test_add_data_func ("/gestures/click/rolling-touch/plain-reversed", GUINT_TO_POINTER (2), test_rolling_touch_buttons);
