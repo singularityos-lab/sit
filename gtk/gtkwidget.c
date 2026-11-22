@@ -2953,6 +2953,16 @@ update_cursor_on_state_change (GtkWidget *widget)
     gtk_window_update_pointer_focus_on_state_change (GTK_WINDOW (root), widget);
 }
 
+static void
+update_cursor_on_transform (GtkWidget *widget)
+{
+  GtkRoot *root;
+
+  root = _gtk_widget_get_root (widget);
+  if (GTK_IS_WINDOW (root))
+    gtk_window_update_pointer_focus_on_transform (GTK_WINDOW (root), widget);
+}
+
 /**
  * gtk_widget_map:
  * @widget: a widget
@@ -4230,7 +4240,7 @@ _gtk_widget_set_visual_transform (GtkWidget    *widget,
   if (GTK_IS_WINDOW (root))
     _gtk_window_invalidate_border_region (GTK_WINDOW (root), widget);
   gtk_widget_update_paintables (widget);
-  update_cursor_on_state_change (widget);
+  update_cursor_on_transform (widget);
   if (priv->parent != NULL)
     gtk_widget_queue_draw (priv->parent);
 
@@ -4310,7 +4320,7 @@ _gtk_widget_set_visual_clip (GtkWidget            *widget,
     _gtk_window_invalidate_border_region (GTK_WINDOW (root), widget);
   priv = gtk_widget_get_instance_private (widget);
   gtk_widget_update_paintables (widget);
-  update_cursor_on_state_change (widget);
+  update_cursor_on_transform (widget);
   if (priv->parent != NULL)
     gtk_widget_queue_draw (priv->parent);
   return TRUE;

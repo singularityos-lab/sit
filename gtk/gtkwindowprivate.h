@@ -112,6 +112,8 @@ void             gtk_window_set_pointer_focus_grab (GtkWindow        *window,
 
 void             gtk_window_update_pointer_focus_on_state_change (GtkWindow *window,
                                                                   GtkWidget *widget);
+void             gtk_window_update_pointer_focus_on_transform (GtkWindow *window,
+                                                               GtkWidget *widget);
 
 void             gtk_window_maybe_revoke_implicit_grab (GtkWindow *window,
                                                         GdkDevice *device,

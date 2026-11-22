@@ -7063,6 +7063,26 @@ gtk_window_update_pointer_focus (GtkWindow        *window,
     }
 }
 
+static void
+repick_pointer_focus (GtkWindow       *window,
+                      GtkPointerFocus *focus)
+{
+  GtkWidget *old_target;
+
+  old_target = g_object_ref (focus->target);
+  gtk_pointer_focus_repick_target (focus);
+  if (gtk_widget_get_native (focus->target) == gtk_widget_get_native (old_target))
+    {
+      gtk_synthesize_crossing_events (GTK_ROOT (window),
+                                      GTK_CROSSING_POINTER,
+                                      old_target, focus->target,
+                                      focus->x, focus->y,
+                                      GDK_CROSSING_NORMAL,
+                                      NULL);
+    }
+  g_object_unref (old_target);
+}
+
 void
 gtk_window_update_pointer_focus_on_state_change (GtkWindow *window,
                                                  GtkWidget *widget)
@@ -7099,21 +7119,33 @@ gtk_window_update_pointer_focus_on_state_change (GtkWindow *window,
       else if (focus->target == widget ||
                gtk_widget_is_ancestor (focus->target, widget))
         {
-          GtkWidget *old_target;
-
-          old_target = g_object_ref (focus->target);
-          gtk_pointer_focus_repick_target (focus);
-          if (gtk_widget_get_native (focus->target) == gtk_widget_get_native (old_target))
-            {
-              gtk_synthesize_crossing_events (GTK_ROOT (window),
-                                              GTK_CROSSING_POINTER,
-                                              old_target, focus->target,
-                                              focus->x, focus->y,
-                                              GDK_CROSSING_NORMAL,
-                                              NULL);
-            }
-          g_object_unref (old_target);
+          repick_pointer_focus (window, focus);
         }
+
+      gtk_pointer_focus_unref (focus);
+
+      l = next;
+    }
+}
+
+void
+gtk_window_update_pointer_focus_on_transform (GtkWindow *window,
+                                              GtkWidget *widget)
+{
+  GtkWindowPrivate *priv = gtk_window_get_instance_private (window);
+  GList *l = priv->foci;
+
+  while (l)
+    {
+      GtkPointerFocus *focus = l->data;
+      GList *next = l->next;
+
+      gtk_pointer_focus_ref (focus);
+
+      if (focus->grab_widget == NULL &&
+          (focus->target == widget ||
+           gtk_widget_is_ancestor (focus->target, widget)))
+        repick_pointer_focus (window, focus);
 
       gtk_pointer_focus_unref (focus);
 
