@@ -651,8 +651,9 @@ gtk_tooltip_position (GtkTooltip *tooltip,
   if (device)
     {
       const int max_x_distance = 32;
-      /* Max 48x48 icon + default padding */
-      const int max_anchor_rect_height = 48 + 8;
+      const int max_centered_width = 160;
+      /* Max dock item + default padding */
+      const int max_anchor_rect_height = 96 + 8;
       double px, py;
       int pointer_x, pointer_y;
 
@@ -680,7 +681,7 @@ gtk_tooltip_position (GtkTooltip *tooltip,
           anchor_rect.width = cursor_size;
           anchor_rect.height = cursor_size;
         }
-      else
+      else if (anchor_rect.width > max_centered_width)
         {
           int anchor_point_x;
           int x_distance;

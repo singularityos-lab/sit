@@ -26,6 +26,9 @@
 
 #include "gtktooltipwindowprivate.h"
 
+#include "gtkcssprovider.h"
+#include "gtkstyleprovider.h"
+
 #include "gtkbinlayout.h"
 #include "gtkbox.h"
 #include "gtkimage.h"
@@ -266,11 +269,37 @@ surface_transform_changed_cb (GtkWidget               *widget,
 }
 
 
+static const char tooltip_css[] =
+  "tooltip.background, tooltip.background.csd { padding: 5px 12px; border-radius: 14px; }"
+  "@keyframes sit-tooltip-fade { from { opacity: 0; } to { opacity: 1; } }"
+  "@keyframes sit-tooltip-rise { from { transform: translateY(4px) scale(0.96); } to { transform: none; } }"
+  "tooltip.appearing { animation: sit-tooltip-fade 140ms ease-out; }"
+  "tooltip.appearing > box { animation: sit-tooltip-rise 180ms ease-out; }";
+
+static void
+ensure_tooltip_style (GdkDisplay *display)
+{
+  GtkCssProvider *provider;
+
+  if (g_object_get_data (G_OBJECT (display), "sit-tooltip-style"))
+    return;
+
+  provider = gtk_css_provider_new ();
+  gtk_css_provider_load_from_string (provider, tooltip_css);
+  gtk_style_context_add_provider_for_display (display,
+                                              GTK_STYLE_PROVIDER (provider),
+                                              GTK_STYLE_PROVIDER_PRIORITY_THEME + 1);
+  g_object_set_data_full (G_OBJECT (display), "sit-tooltip-style", provider, g_object_unref);
+}
+
 static void
 gtk_tooltip_window_map (GtkWidget *widget)
 {
   GtkTooltipWindow *window = GTK_TOOLTIP_WINDOW (widget);
   GdkPopupLayout *layout;
+
+  ensure_tooltip_style (gtk_widget_get_display (widget));
+  gtk_widget_add_css_class (widget, "appearing");
 
   layout = create_popup_layout (window);
   gdk_popup_present (GDK_POPUP (window->surface),
@@ -302,6 +331,7 @@ gtk_tooltip_window_unmap (GtkWidget *widget)
 
   GTK_WIDGET_CLASS (gtk_tooltip_window_parent_class)->unmap (widget);
   gdk_surface_hide (window->surface);
+  gtk_widget_remove_css_class (widget, "appearing");
 
   gtk_widget_unmap (window->box);
 }
