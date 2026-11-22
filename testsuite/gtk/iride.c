@@ -5,6 +5,9 @@
 
 #define RED 0xffff0000
 #define BLUE 0xff0000ff
+#define RESOURCE_PATH "/org/gtk/test/iride"
+
+static char *overlay;
 
 static guint32
 crc32_of (const guint8 *data,
@@ -66,11 +69,9 @@ red_icon (int side)
 }
 
 static guint32
-center_of_icon (const char *dir,
-                int         size)
+center_of_icon (GtkIconTheme *theme,
+                int           size)
 {
-  const char *path[] = { dir, NULL };
-  GtkIconTheme *theme = gtk_icon_theme_new ();
   GtkIconPaintable *icon;
   GtkSnapshot *snapshot = gtk_snapshot_new ();
   GskRenderNode *node;
@@ -78,8 +79,6 @@ center_of_icon (const char *dir,
   cairo_t *cr;
   guint32 pixel;
 
-  gtk_icon_theme_set_theme_name (theme, "test");
-  gtk_icon_theme_set_search_path (theme, path);
   icon = gtk_icon_theme_lookup_icon (theme, "probe", NULL, size, 1, GTK_TEXT_DIR_LTR, 0);
   gdk_paintable_snapshot (GDK_PAINTABLE (icon), snapshot, size, size);
   node = gtk_snapshot_free_to_node (snapshot);
@@ -96,7 +95,6 @@ center_of_icon (const char *dir,
   cairo_surface_destroy (surface);
   gsk_render_node_unref (node);
   g_object_unref (icon);
-  g_object_unref (theme);
 
   return pixel;
 }
@@ -112,6 +110,7 @@ check_icon (GBytes  *iride,
   char *index = g_build_filename (theme, "index.theme", NULL);
   char *svg = g_build_filename (apps, "probe.svg", NULL);
   char *sibling = g_build_filename (apps, "probe.iride", NULL);
+  GtkIconTheme *icons;
   gboolean ok;
 
   g_assert_cmpint (g_mkdir_with_parents (apps, 0700), ==, 0);
@@ -129,7 +128,11 @@ check_icon (GBytes  *iride,
       g_assert_true (ok);
     }
 
-  g_assert_cmphex (center_of_icon (root, size), ==, expected);
+  icons = gtk_icon_theme_new ();
+  gtk_icon_theme_set_theme_name (icons, "test");
+  gtk_icon_theme_set_search_path (icons, (const char * const[]) { root, NULL });
+  g_assert_cmphex (center_of_icon (icons, size), ==, expected);
+  g_object_unref (icons);
 
   g_remove (sibling);
   g_remove (svg);
@@ -177,14 +180,73 @@ test_svg_fallback (void)
   g_bytes_unref (empty);
 }
 
+static void
+check_resource (GBytes  *iride,
+                int      size,
+                guint32  expected)
+{
+  char *svg = g_build_filename (overlay, "probe.svg", NULL);
+  char *sibling = g_build_filename (overlay, "probe.iride", NULL);
+  GtkIconTheme *icons;
+  gboolean ok;
+
+  ok = g_file_set_contents (svg,
+                            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"48\" height=\"48\">"
+                            "<rect width=\"48\" height=\"48\" fill=\"#0000ff\"/></svg>", -1, NULL);
+  g_assert_true (ok);
+  if (iride)
+    {
+      ok = g_file_set_contents (sibling, g_bytes_get_data (iride, NULL), g_bytes_get_size (iride), NULL);
+      g_assert_true (ok);
+    }
+
+  icons = gtk_icon_theme_new ();
+  gtk_icon_theme_set_theme_name (icons, "test");
+  gtk_icon_theme_set_search_path (icons, (const char * const[]) { NULL });
+  gtk_icon_theme_set_resource_path (icons, (const char * const[]) { RESOURCE_PATH, NULL });
+  g_assert_cmphex (center_of_icon (icons, size), ==, expected);
+  g_object_unref (icons);
+
+  g_remove (sibling);
+  g_remove (svg);
+  g_free (sibling);
+  g_free (svg);
+}
+
+static void
+test_resource (void)
+{
+  GBytes *iride = red_icon (32);
+
+  check_resource (NULL, 32, BLUE);
+  check_resource (iride, 64, BLUE);
+  check_resource (iride, 32, RED);
+  g_bytes_unref (iride);
+}
+
 int
 main (int argc, char *argv[])
 {
+  char *mapping;
+  int result;
+
+  overlay = g_dir_make_tmp ("iride-XXXXXX", NULL);
+  g_assert_nonnull (overlay);
+  mapping = g_strdup_printf ("%s=%s", RESOURCE_PATH, overlay);
+  g_setenv ("G_RESOURCE_OVERLAYS", mapping, TRUE);
+  g_free (mapping);
+
   gtk_test_init (&argc, &argv);
 
   g_test_add_func ("/iride/sibling", test_sibling);
   g_test_add_func ("/iride/never-enlarged", test_never_enlarged);
   g_test_add_func ("/iride/svg-fallback", test_svg_fallback);
 
-  return g_test_run ();
+  g_test_add_func ("/iride/resource", test_resource);
+
+  result = g_test_run ();
+  g_remove (overlay);
+  g_free (overlay);
+
+  return result;
 }

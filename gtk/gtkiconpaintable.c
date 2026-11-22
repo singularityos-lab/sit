@@ -102,10 +102,11 @@ new_resource_file (const char *filename)
 #ifdef HAVE_IRIDE
 static GdkTexture *
 load_iride_sibling (const char *svg_filename,
+                    gboolean    is_resource,
                     int         pixel_size)
 {
   GString *path;
-  GMappedFile *file;
+  GBytes *data = NULL;
   GdkTexture *texture = NULL;
   const guint8 *png;
   gsize png_len;
@@ -113,15 +114,28 @@ load_iride_sibling (const char *svg_filename,
 
   path = g_string_new_len (svg_filename, strlen (svg_filename) - strlen (".svg"));
   g_string_append (path, ".iride");
-  file = g_mapped_file_new (path->str, FALSE, NULL);
+  if (is_resource)
+    {
+      data = g_resources_lookup_data (path->str, G_RESOURCE_LOOKUP_FLAGS_NONE, NULL);
+    }
+  else
+    {
+      GMappedFile *file = g_mapped_file_new (path->str, FALSE, NULL);
+
+      if (file)
+        {
+          data = g_mapped_file_get_bytes (file);
+          g_mapped_file_unref (file);
+        }
+    }
   g_string_free (path, TRUE);
 
-  if (!file)
+  if (!data)
     return NULL;
 
-  if (g_mapped_file_get_length (file) > 0 &&
-      iride_pick ((const guint8 *) g_mapped_file_get_contents (file),
-                  g_mapped_file_get_length (file),
+  if (g_bytes_get_size (data) > 0 &&
+      iride_pick (g_bytes_get_data (data, NULL),
+                  g_bytes_get_size (data),
                   MAX (pixel_size, 1),
                   &png, &png_len, &size) == 0)
     {
@@ -131,7 +145,7 @@ load_iride_sibling (const char *svg_filename,
       g_bytes_unref (bytes);
     }
 
-  g_mapped_file_unref (file);
+  g_bytes_unref (data);
 
   return texture;
 }
@@ -188,10 +202,17 @@ icon_ensure_node__locked (GtkIconPaintable *icon,
                                                                   &load_error);
             }
           else
-            texture = gdk_texture_new_from_resource_at_scale (icon->filename,
-                                                              pixel_size, pixel_size,
-                                                              &only_fg,
-                                                              &load_error);
+            {
+#ifdef HAVE_IRIDE
+              texture = load_iride_sibling (icon->filename, TRUE, pixel_size);
+#endif
+
+              if (!texture)
+                texture = gdk_texture_new_from_resource_at_scale (icon->filename,
+                                                                  pixel_size, pixel_size,
+                                                                  &only_fg,
+                                                                  &load_error);
+            }
         }
       else
         texture = gdk_texture_new_from_resource_with_fg (icon->filename, &only_fg);
@@ -221,7 +242,7 @@ icon_ensure_node__locked (GtkIconPaintable *icon,
               GInputStream *stream = NULL;
 
 #ifdef HAVE_IRIDE
-              texture = load_iride_sibling (icon->filename, pixel_size);
+              texture = load_iride_sibling (icon->filename, FALSE, pixel_size);
 #endif
 
               if (!texture)
