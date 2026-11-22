@@ -72,6 +72,11 @@ option('sysprof',
        value: 'disabled',
        description : 'include tracing support for sysprof')
 
+option('iride',
+       type: 'feature',
+       value: 'disabled',
+       description : 'Enable Iride icons')
+
 option('tracker',
        type: 'feature',
        value: 'disabled',

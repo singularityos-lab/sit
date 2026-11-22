@@ -28,6 +28,10 @@
 #include "gdk/gdktextureprivate.h"
 #include "gdk/gdkprofilerprivate.h"
 
+#ifdef HAVE_IRIDE
+#include <libiride.h>
+#endif
+
 
 /**
  * GtkIconPaintable:
@@ -94,6 +98,44 @@ new_resource_file (const char *filename)
 
 /* }}} */
 /* {{{ Icon loading */
+
+#ifdef HAVE_IRIDE
+static GdkTexture *
+load_iride_sibling (const char *svg_filename,
+                    int         pixel_size)
+{
+  GString *path;
+  GMappedFile *file;
+  GdkTexture *texture = NULL;
+  const guint8 *png;
+  gsize png_len;
+  guint32 size;
+
+  path = g_string_new_len (svg_filename, strlen (svg_filename) - strlen (".svg"));
+  g_string_append (path, ".iride");
+  file = g_mapped_file_new (path->str, FALSE, NULL);
+  g_string_free (path, TRUE);
+
+  if (!file)
+    return NULL;
+
+  if (g_mapped_file_get_length (file) > 0 &&
+      iride_pick ((const guint8 *) g_mapped_file_get_contents (file),
+                  g_mapped_file_get_length (file),
+                  MAX (pixel_size, 1),
+                  &png, &png_len, &size) == 0)
+    {
+      GBytes *bytes = g_bytes_new (png, png_len);
+
+      texture = gdk_texture_new_from_bytes (bytes, NULL);
+      g_bytes_unref (bytes);
+    }
+
+  g_mapped_file_unref (file);
+
+  return texture;
+}
+#endif
 
 /* This function contains the complicated logic for deciding
  * on the size at which to load the icon and loading it at
@@ -176,7 +218,14 @@ icon_ensure_node__locked (GtkIconPaintable *icon,
           else
             {
               GFile *file = g_file_new_for_path (icon->filename);
-              GInputStream *stream = G_INPUT_STREAM (g_file_read (file, NULL, &load_error));
+              GInputStream *stream = NULL;
+
+#ifdef HAVE_IRIDE
+              texture = load_iride_sibling (icon->filename, pixel_size);
+#endif
+
+              if (!texture)
+                stream = G_INPUT_STREAM (g_file_read (file, NULL, &load_error));
 
               if (stream)
                 {

@@ -514,6 +514,11 @@ if os_unix
   platform_gio_dep = giounix_dep
 endif
 
+iride_dep = cc.find_library('iride',
+                            has_headers: 'libiride.h',
+                            required: get_option('iride'))
+cdata.set('HAVE_IRIDE', iride_dep.found())
+
 tracker3_dep = dependency('tracker-sparql-3.0', required: get_option('tracker'))
 cdata.set('HAVE_TRACKER3', tracker3_dep.found())
 
@@ -1051,6 +1056,7 @@ summary('Vulkan support', vulkan_dep.found(), section: 'Features')
 summary('Cloud support', cloudproviders_dep.found(), section: 'Features')
 summary('Sysprof support', libsysprof_capture_dep.found(), section: 'Features')
 summary('Colord support', colord_dep.found(), section: 'Features')
+summary('Iride icons', iride_dep.found(), section: 'Features')
 summary('Tracker support', tracker3_dep.found(), section: 'Features')
 summary('AccessKit support', accesskit_dep.found(), section: 'Features')
 

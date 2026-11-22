@@ -174,6 +174,12 @@ foreach flag: common_cflags
   endif
 endforeach
 
+if iride_dep.found()
+  tests += [
+    { 'name': 'iride' },
+  ]
+endif
+
 foreach t : tests
   test_name = t.get('name')
   test_srcs = ['@0@.c'.format(test_name)] + t.get('sources', [])

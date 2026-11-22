@@ -1021,6 +1021,10 @@ if os_unix
   gtk_deps += tracker3_dep
 endif
 
+if iride_dep.found()
+  gtk_deps += iride_dep
+endif
+
 # Unconditional. If libintl isn't found,
 # the object just does nothing being in the deplist
 gtk_deps += libintl_dep
