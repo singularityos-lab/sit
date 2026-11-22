@@ -33,7 +33,6 @@
 #ifdef HAVE_UDMABUF
 #include <linux/udmabuf.h>
 #endif
-#include <epoxy/egl.h>
 #include <errno.h>
 
 GdkDmabufFormats *
