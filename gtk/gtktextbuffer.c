@@ -30,6 +30,7 @@
 #include "gtkmarshalers.h"
 #include "gtktextbuffer.h"
 #include "gtktexthistoryprivate.h"
+#include "sit.h"
 #include "gtktextbufferprivate.h"
 #include "gtktextbtreeprivate.h"
 #include "gtktextiterprivate.h"
@@ -5973,4 +5974,22 @@ gtk_text_buffer_commit_notify (GtkTextBuffer            *buffer,
     }
 
   buffer->priv->in_commit_notify = FALSE;
+}
+
+GVariant *
+sit_text_buffer_save_history (GtkTextBuffer *buffer)
+{
+  g_return_val_if_fail (GTK_IS_TEXT_BUFFER (buffer), NULL);
+
+  return gtk_text_history_save (buffer->priv->history);
+}
+
+gboolean
+sit_text_buffer_restore_history (GtkTextBuffer *buffer,
+                                 GVariant      *history)
+{
+  g_return_val_if_fail (GTK_IS_TEXT_BUFFER (buffer), FALSE);
+  g_return_val_if_fail (history != NULL, FALSE);
+
+  return gtk_text_history_restore (buffer->priv->history, history);
 }

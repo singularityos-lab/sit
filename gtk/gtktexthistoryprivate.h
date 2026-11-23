@@ -75,6 +75,9 @@ void            gtk_text_history_text_deleted              (GtkTextHistory      
                                                             const char                *text,
                                                             int                        len);
 gboolean        gtk_text_history_get_enabled               (GtkTextHistory            *self);
+GVariant       *gtk_text_history_save                      (GtkTextHistory            *self);
+gboolean        gtk_text_history_restore                   (GtkTextHistory            *self,
+                                                            GVariant                  *state);
 void            gtk_text_history_set_enabled               (GtkTextHistory            *self,
                                                             gboolean                   enabled);
 

@@ -282,4 +282,18 @@ GBytes *sit_file_load_finish (GFile         *file,
 GDK_AVAILABLE_IN_ALL
 void sit_async_flush (void);
 
+GDK_AVAILABLE_IN_ALL
+GVariant *sit_text_buffer_save_history (GtkTextBuffer *buffer);
+
+GDK_AVAILABLE_IN_ALL
+gboolean sit_text_buffer_restore_history (GtkTextBuffer *buffer,
+                                          GVariant      *history);
+
+GDK_AVAILABLE_IN_ALL
+GVariant *sit_text_save_history (GtkText *self);
+
+GDK_AVAILABLE_IN_ALL
+gboolean sit_text_restore_history (GtkText  *self,
+                                   GVariant *history);
+
 G_END_DECLS

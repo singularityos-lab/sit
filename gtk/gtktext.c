@@ -62,6 +62,7 @@
 #include "gtksnapshot.h"
 #include "gtktexthandleprivate.h"
 #include "gtktexthistoryprivate.h"
+#include "sit.h"
 #include "gtktextutilprivate.h"
 #include "gtktooltip.h"
 #include "gtktypebuiltins.h"
@@ -7903,3 +7904,27 @@ gtk_text_accessible_text_init (GtkAccessibleTextInterface *iface)
 /* }}} */
 
 /* vim:set foldmethod=marker: */
+
+GVariant *
+sit_text_save_history (GtkText *self)
+{
+  GtkTextPrivate *priv;
+
+  g_return_val_if_fail (GTK_IS_TEXT (self), NULL);
+
+  priv = gtk_text_get_instance_private (self);
+  return gtk_text_history_save (priv->history);
+}
+
+gboolean
+sit_text_restore_history (GtkText  *self,
+                          GVariant *history)
+{
+  GtkTextPrivate *priv;
+
+  g_return_val_if_fail (GTK_IS_TEXT (self), FALSE);
+  g_return_val_if_fail (history != NULL, FALSE);
+
+  priv = gtk_text_get_instance_private (self);
+  return gtk_text_history_restore (priv->history, history);
+}

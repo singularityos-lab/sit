@@ -1251,3 +1251,248 @@ gtk_text_history_set_max_undo_levels (GtkTextHistory *self,
       gtk_text_history_truncate (self);
     }
 }
+
+#define HISTORY_ACTION_TYPE "(ubbsuuiiuav)"
+#define HISTORY_TYPE "(uiiubbbavav)"
+#define HISTORY_VERSION 1
+
+static GVariant *
+action_to_variant (Action *action)
+{
+  GVariantBuilder children;
+  const char *text = "";
+  guint begin = 0, end = 0, depth = 0;
+  int sel_insert = 0, sel_bound = 0;
+
+  g_variant_builder_init (&children, G_VARIANT_TYPE ("av"));
+
+  switch (action->kind)
+    {
+    case ACTION_KIND_INSERT:
+      text = istring_str (&action->u.insert.istr);
+      begin = action->u.insert.begin;
+      end = action->u.insert.end;
+      break;
+
+    case ACTION_KIND_DELETE_BACKSPACE:
+    case ACTION_KIND_DELETE_KEY:
+    case ACTION_KIND_DELETE_PROGRAMMATIC:
+    case ACTION_KIND_DELETE_SELECTION:
+      text = istring_str (&action->u.delete.istr);
+      begin = action->u.delete.begin;
+      end = action->u.delete.end;
+      sel_insert = action->u.delete.selection.insert;
+      sel_bound = action->u.delete.selection.bound;
+      break;
+
+    case ACTION_KIND_GROUP:
+      depth = action->u.group.depth;
+      for (const GList *iter = action->u.group.actions.head; iter; iter = iter->next)
+        g_variant_builder_add (&children, "v", action_to_variant (iter->data));
+      break;
+
+    case ACTION_KIND_BARRIER:
+    default:
+      break;
+    }
+
+  return g_variant_new (HISTORY_ACTION_TYPE,
+                        (guint) action->kind,
+                        (gboolean) action->is_modified,
+                        (gboolean) action->is_modified_set,
+                        text, begin, end, sel_insert, sel_bound, depth,
+                        &children);
+}
+
+static GVariant *
+queue_to_variant (const GQueue *queue)
+{
+  GVariantBuilder builder;
+
+  g_variant_builder_init (&builder, G_VARIANT_TYPE ("av"));
+  for (const GList *iter = queue->head; iter; iter = iter->next)
+    g_variant_builder_add (&builder, "v", action_to_variant (iter->data));
+
+  return g_variant_builder_end (&builder);
+}
+
+GVariant *
+gtk_text_history_save (GtkTextHistory *self)
+{
+  g_return_val_if_fail (GTK_IS_TEXT_HISTORY (self), NULL);
+
+  if (self->irreversible || self->in_user || self->applying)
+    return NULL;
+
+  return g_variant_ref_sink (g_variant_new ("(uiiubbb@av@av)",
+                                            (guint) HISTORY_VERSION,
+                                            self->selection.insert,
+                                            self->selection.bound,
+                                            self->max_undo_levels,
+                                            (gboolean) self->enabled,
+                                            (gboolean) self->is_modified,
+                                            (gboolean) self->is_modified_set,
+                                            queue_to_variant (&self->undo_queue),
+                                            queue_to_variant (&self->redo_queue)));
+}
+
+static Action *
+action_from_variant (GVariant *variant)
+{
+  guint kind, begin, end, depth;
+  gboolean is_modified, is_modified_set;
+  const char *text;
+  int sel_insert, sel_bound;
+  GVariantIter *children;
+  Action *action = NULL;
+
+  if (!g_variant_is_of_type (variant, G_VARIANT_TYPE (HISTORY_ACTION_TYPE)))
+    return NULL;
+
+  g_variant_get (variant, "(ubb&suuiiuav)", &kind, &is_modified, &is_modified_set,
+                 &text, &begin, &end, &sel_insert, &sel_bound, &depth, &children);
+
+  if (begin > end)
+    goto out;
+
+  switch (kind)
+    {
+    case ACTION_KIND_INSERT:
+    case ACTION_KIND_DELETE_BACKSPACE:
+    case ACTION_KIND_DELETE_KEY:
+    case ACTION_KIND_DELETE_PROGRAMMATIC:
+    case ACTION_KIND_DELETE_SELECTION:
+      if (!g_utf8_validate (text, -1, NULL) ||
+          (guint) g_utf8_strlen (text, -1) != end - begin)
+        goto out;
+
+      action = action_new (kind);
+      if (kind == ACTION_KIND_INSERT)
+        {
+          istring_set (&action->u.insert.istr, text, strlen (text), end - begin);
+          action->u.insert.begin = begin;
+          action->u.insert.end = end;
+        }
+      else
+        {
+          istring_set (&action->u.delete.istr, text, strlen (text), end - begin);
+          action->u.delete.begin = begin;
+          action->u.delete.end = end;
+          action->u.delete.selection.insert = sel_insert;
+          action->u.delete.selection.bound = sel_bound;
+        }
+      break;
+
+    case ACTION_KIND_GROUP:
+      {
+        GVariant *child;
+
+        action = action_new (kind);
+        action->u.group.depth = depth;
+        while (g_variant_iter_next (children, "v", &child))
+          {
+            Action *inner = action_from_variant (child);
+
+            g_variant_unref (child);
+            if (inner == NULL)
+              {
+                g_clear_pointer (&action, action_free);
+                goto out;
+              }
+            g_queue_push_tail_link (&action->u.group.actions, &inner->link);
+          }
+      }
+      break;
+
+    case ACTION_KIND_BARRIER:
+      action = action_new (kind);
+      break;
+
+    default:
+      goto out;
+    }
+
+  action->is_modified = !!is_modified;
+  action->is_modified_set = !!is_modified_set;
+
+out:
+  g_variant_iter_free (children);
+  return action;
+}
+
+static gboolean
+queue_from_variant (GQueue   *queue,
+                    GVariant *actions)
+{
+  GVariantIter iter;
+  GVariant *child;
+
+  g_variant_iter_init (&iter, actions);
+  while (g_variant_iter_next (&iter, "v", &child))
+    {
+      Action *action = action_from_variant (child);
+
+      g_variant_unref (child);
+      if (action == NULL)
+        return FALSE;
+      g_queue_push_tail_link (queue, &action->link);
+    }
+
+  return TRUE;
+}
+
+gboolean
+gtk_text_history_restore (GtkTextHistory *self,
+                          GVariant       *state)
+{
+  guint version, max_undo_levels;
+  int sel_insert, sel_bound;
+  gboolean enabled, is_modified, is_modified_set;
+  GVariant *undo = NULL, *redo = NULL;
+  GQueue undo_queue = G_QUEUE_INIT;
+  GQueue redo_queue = G_QUEUE_INIT;
+  gboolean ok = FALSE;
+
+  g_return_val_if_fail (GTK_IS_TEXT_HISTORY (self), FALSE);
+  g_return_val_if_fail (state != NULL, FALSE);
+
+  if (self->irreversible || self->in_user || self->applying)
+    return FALSE;
+
+  if (!g_variant_is_of_type (state, G_VARIANT_TYPE (HISTORY_TYPE)))
+    return FALSE;
+
+  g_variant_get (state, "(uiiubbb@av@av)", &version, &sel_insert, &sel_bound,
+                 &max_undo_levels, &enabled, &is_modified, &is_modified_set,
+                 &undo, &redo);
+
+  if (version != HISTORY_VERSION)
+    goto out;
+
+  if (!queue_from_variant (&undo_queue, undo) ||
+      !queue_from_variant (&redo_queue, redo))
+    {
+      clear_action_queue (&undo_queue);
+      clear_action_queue (&redo_queue);
+      goto out;
+    }
+
+  clear_action_queue (&self->undo_queue);
+  clear_action_queue (&self->redo_queue);
+  self->undo_queue = undo_queue;
+  self->redo_queue = redo_queue;
+  self->selection.insert = sel_insert;
+  self->selection.bound = sel_bound;
+  self->max_undo_levels = max_undo_levels;
+  self->enabled = !!enabled;
+  self->is_modified = !!is_modified;
+  self->is_modified_set = !!is_modified_set;
+
+  gtk_text_history_update_state (self);
+  ok = TRUE;
+
+out:
+  g_clear_pointer (&undo, g_variant_unref);
+  g_clear_pointer (&redo, g_variant_unref);
+  return ok;
+}
