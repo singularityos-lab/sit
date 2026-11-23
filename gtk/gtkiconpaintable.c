@@ -103,7 +103,9 @@ new_resource_file (const char *filename)
 static GdkTexture *
 load_iride_sibling (const char *svg_filename,
                     gboolean    is_resource,
-                    int         pixel_size)
+                    int         pixel_size,
+                    gboolean    dark,
+                    guint32     accent)
 {
   GString *path;
   GBytes *data = NULL;
@@ -139,10 +141,34 @@ load_iride_sibling (const char *svg_filename,
                   MAX (pixel_size, 1),
                   &png, &png_len, &size) == 0)
     {
-      GBytes *bytes = g_bytes_new (png, png_len);
+      if (!dark && accent == IRIDE_NO_ACCENT)
+        {
+          GBytes *bytes = g_bytes_new (png, png_len);
 
-      texture = gdk_texture_new_from_bytes (bytes, NULL);
-      g_bytes_unref (bytes);
+          texture = gdk_texture_new_from_bytes (bytes, NULL);
+          g_bytes_unref (bytes);
+        }
+      else
+        {
+          gsize stride = (gsize) size * 4;
+          guint8 *pixels = g_malloc (stride * size * 2);
+
+          if (iride_still (g_bytes_get_data (data, NULL),
+                           g_bytes_get_size (data),
+                           MAX (pixel_size, 1),
+                           dark ? IRIDE_DARK : IRIDE_LIGHT,
+                           accent,
+                           pixels, stride * size * 2,
+                           &size) == 0)
+            {
+              GBytes *bytes = g_bytes_new_take (g_realloc (pixels, stride * size), stride * size);
+
+              texture = gdk_memory_texture_new (size, size, GDK_MEMORY_B8G8R8A8_PREMULTIPLIED, bytes, stride);
+              g_bytes_unref (bytes);
+            }
+          else
+            g_free (pixels);
+        }
     }
 
   g_bytes_unref (data);
@@ -204,7 +230,7 @@ icon_ensure_node__locked (GtkIconPaintable *icon,
           else
             {
 #ifdef HAVE_IRIDE
-              texture = load_iride_sibling (icon->filename, TRUE, pixel_size);
+              texture = load_iride_sibling (icon->filename, TRUE, pixel_size, icon->dark, icon->accent);
 #endif
 
               if (!texture)
@@ -242,7 +268,7 @@ icon_ensure_node__locked (GtkIconPaintable *icon,
               GInputStream *stream = NULL;
 
 #ifdef HAVE_IRIDE
-              texture = load_iride_sibling (icon->filename, FALSE, pixel_size);
+              texture = load_iride_sibling (icon->filename, FALSE, pixel_size, icon->dark, icon->accent);
 #endif
 
               if (!texture)
@@ -580,6 +606,7 @@ gtk_icon_paintable_init (GtkIconPaintable *icon)
   icon->allow_node = 1;
   icon->allow_recolor = 1;
   icon->allow_mask = 1;
+  icon->accent = 0xffffffffu;
 
   icon->desired_size = 16;
   icon->desired_scale = 1;

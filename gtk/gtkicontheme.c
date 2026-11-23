@@ -352,6 +352,9 @@ struct _GtkIconTheme
   GdkDisplay *display;
   GtkSettings *display_settings;
 
+  gboolean dark;
+  guint32 accent;
+
   /* time when we last stat:ed for theme changes */
   gint64 last_stat_time;
   GArray *dir_mtimes;
@@ -709,6 +712,8 @@ icon_cache_add (GtkIconTheme     *theme,
 
   G_LOCK (icon_cache);
   icon->in_cache = theme;
+  icon->dark = theme->dark;
+  icon->accent = theme->accent;
   g_hash_table_insert (theme->icon_cache, &icon->key, icon);
 
   if (_icon_cache_should_lru_cache (icon))
@@ -1079,6 +1084,31 @@ update_current_theme__mainthread (GtkIconTheme *self)
   ((_old && !_new) || (!_old && _new) || \
    (_old && _new && strcmp (_old, _new) != 0))
 
+  if (self->display)
+    {
+      GtkSettings *settings = gtk_settings_get_for_display (self->display);
+      gboolean dark = FALSE;
+      char *accent = NULL;
+      guint32 rgb = 0xffffffffu;
+      GdkRGBA color;
+
+      g_object_get (settings, "gtk-icon-dark", &dark, "gtk-icon-accent", &accent, NULL);
+      if (accent && accent[0] && gdk_rgba_parse (&color, accent))
+        rgb = ((guint32) (color.red * 255 + 0.5) << 16) |
+              ((guint32) (color.green * 255 + 0.5) << 8) |
+              (guint32) (color.blue * 255 + 0.5);
+      g_free (accent);
+
+      if (dark != self->dark || rgb != self->accent)
+        {
+          G_LOCK (icon_cache);
+          self->dark = dark;
+          self->accent = rgb;
+          G_UNLOCK (icon_cache);
+          do_theme_change (self);
+        }
+    }
+
   if (!self->custom_theme)
     {
       char *theme = NULL;
@@ -1172,6 +1202,16 @@ gtk_icon_theme_set_display (GtkIconTheme *self,
                              gtk_icon_theme_ref_ref (self->ref),
                              (GClosureNotify)gtk_icon_theme_ref_unref,
                              0);
+      g_signal_connect_data (self->display_settings, "notify::gtk-icon-dark",
+                             G_CALLBACK (theme_changed__mainthread_unlocked),
+                             gtk_icon_theme_ref_ref (self->ref),
+                             (GClosureNotify)gtk_icon_theme_ref_unref,
+                             0);
+      g_signal_connect_data (self->display_settings, "notify::gtk-icon-accent",
+                             G_CALLBACK (theme_changed__mainthread_unlocked),
+                             gtk_icon_theme_ref_ref (self->ref),
+                             (GClosureNotify)gtk_icon_theme_ref_unref,
+                             0);
 
       g_object_notify_by_pspec (G_OBJECT (self), props[PROP_DISPLAY]);
     }
@@ -1200,6 +1240,7 @@ gtk_icon_theme_init (GtkIconTheme *self)
   int len;
 
   self->ref = gtk_icon_theme_ref_new (self);
+  self->accent = 0xffffffffu;
 
   self->icon_cache = g_hash_table_new_full (icon_key_hash, icon_key_equal, NULL,
                                             (GDestroyNotify)icon_uncached_cb);

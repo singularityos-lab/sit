@@ -40,6 +40,9 @@ struct _GtkIconPaintable
   guint allow_recolor  : 1;
   guint allow_mask     : 1;
 
+  guint dark           : 1;
+  guint32 accent;
+
   /* Cached information if we go ahead and try to load the icon.
    *
    * All access to these are protected by the texture_lock. Everything

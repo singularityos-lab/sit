@@ -207,6 +207,8 @@ enum {
   PROP_INTERFACE_COLOR_SCHEME,
   PROP_INTERFACE_CONTRAST,
   PROP_INTERFACE_REDUCED_MOTION,
+  PROP_ICON_DARK,
+  PROP_ICON_ACCENT,
 
   NUM_PROPERTIES
 };
@@ -1036,6 +1038,14 @@ gtk_settings_class_init (GtkSettingsClass *class)
                                                              GTK_TYPE_REDUCED_MOTION,
                                                              GTK_REDUCED_MOTION_NO_PREFERENCE,
                                                              GTK_PARAM_READWRITE);
+
+  pspecs[PROP_ICON_DARK] = g_param_spec_boolean ("gtk-icon-dark", NULL, NULL,
+                                                 FALSE,
+                                                 GTK_PARAM_READWRITE);
+
+  pspecs[PROP_ICON_ACCENT] = g_param_spec_string ("gtk-icon-accent", NULL, NULL,
+                                                  NULL,
+                                                  GTK_PARAM_READWRITE);
 
   g_object_class_install_properties (gobject_class, NUM_PROPERTIES, pspecs);
 }
