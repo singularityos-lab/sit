@@ -18,12 +18,14 @@
 #include "config.h"
 
 #include <glib.h>
+#include <glib/gstdio.h>
 
 #include "gtkiconpaintableprivate.h"
 
 #include "gtkiconthemeprivate.h"
 #include "gtksnapshotprivate.h"
 #include "gtksymbolicpaintable.h"
+#include "gtkversion.h"
 #include "gdktextureutilsprivate.h"
 #include "gdk/gdktextureprivate.h"
 #include "gdk/gdkprofilerprivate.h"
@@ -177,6 +179,136 @@ load_iride_sibling (const char *svg_filename,
 }
 #endif
 
+#define RASTER_CACHE_REVISION 1
+#define RASTER_CACHE_KEEP 2048
+#define RASTER_CACHE_TRIM 1536
+
+static char *
+raster_cache_dir (void)
+{
+  return g_build_filename (g_get_user_cache_dir (), "sit", "icons", NULL);
+}
+
+static char *
+raster_cache_path (const char *filename,
+                   int         pixel_size)
+{
+  GStatBuf st;
+  char *key, *sum, *name, *dir, *path;
+
+  if (g_stat (filename, &st) != 0)
+    return NULL;
+
+  key = g_strdup_printf ("%s|%d|%" G_GINT64_FORMAT "|%" G_GINT64_FORMAT "|%" G_GUINT64_FORMAT "|%d.%d.%d|%d",
+                         filename, pixel_size,
+                         (gint64) st.st_mtime, (gint64) st.st_size, (guint64) st.st_ino,
+                         GTK_MAJOR_VERSION, GTK_MINOR_VERSION, GTK_MICRO_VERSION,
+                         RASTER_CACHE_REVISION);
+  sum = g_compute_checksum_for_string (G_CHECKSUM_SHA256, key, -1);
+  name = g_strconcat (sum, ".png", NULL);
+  dir = raster_cache_dir ();
+  path = g_build_filename (dir, name, NULL);
+
+  g_free (dir);
+  g_free (name);
+  g_free (sum);
+  g_free (key);
+
+  return path;
+}
+
+static GdkTexture *
+raster_cache_load (const char *path)
+{
+  GMappedFile *file;
+  GBytes *bytes;
+  GdkTexture *texture;
+
+  file = g_mapped_file_new (path, FALSE, NULL);
+  if (!file)
+    return NULL;
+
+  bytes = g_mapped_file_get_bytes (file);
+  g_mapped_file_unref (file);
+  texture = gdk_texture_new_from_bytes (bytes, NULL);
+  g_bytes_unref (bytes);
+
+  return texture;
+}
+
+typedef struct {
+  char *path;
+  gint64 used;
+} RasterCacheEntry;
+
+static int
+raster_cache_entry_cmp (gconstpointer a,
+                        gconstpointer b)
+{
+  const RasterCacheEntry *x = a, *y = b;
+
+  return x->used < y->used ? -1 : x->used > y->used;
+}
+
+static void
+raster_cache_trim (const char *dir)
+{
+  GDir *d;
+  GArray *entries;
+  const char *name;
+
+  d = g_dir_open (dir, 0, NULL);
+  if (!d)
+    return;
+
+  entries = g_array_new (FALSE, FALSE, sizeof (RasterCacheEntry));
+  while ((name = g_dir_read_name (d)))
+    {
+      RasterCacheEntry e;
+      GStatBuf st;
+
+      if (!g_str_has_suffix (name, ".png"))
+        continue;
+      e.path = g_build_filename (dir, name, NULL);
+      e.used = g_stat (e.path, &st) == 0 ? (gint64) MAX (st.st_atime, st.st_mtime) : 0;
+      g_array_append_val (entries, e);
+    }
+  g_dir_close (d);
+
+  if (entries->len > RASTER_CACHE_KEEP)
+    {
+      g_array_sort (entries, raster_cache_entry_cmp);
+      for (guint i = 0; i < entries->len - RASTER_CACHE_TRIM; i++)
+        g_unlink (g_array_index (entries, RasterCacheEntry, i).path);
+    }
+
+  for (guint i = 0; i < entries->len; i++)
+    g_free (g_array_index (entries, RasterCacheEntry, i).path);
+  g_array_free (entries, TRUE);
+}
+
+static void
+raster_cache_store (const char *path,
+                    GdkTexture *texture)
+{
+  GBytes *png;
+  char *dir;
+
+  dir = g_path_get_dirname (path);
+  if (g_mkdir_with_parents (dir, 0700) == 0)
+    {
+      png = gdk_texture_save_to_png_bytes (texture);
+      if (g_file_set_contents_full (path,
+                                    g_bytes_get_data (png, NULL),
+                                    g_bytes_get_size (png),
+                                    G_FILE_SET_CONTENTS_CONSISTENT,
+                                    0600, NULL))
+        raster_cache_trim (dir);
+      g_bytes_unref (png);
+    }
+  g_free (dir);
+}
+
 /* This function contains the complicated logic for deciding
  * on the size at which to load the icon and loading it at
  * that size.
@@ -271,19 +403,33 @@ icon_ensure_node__locked (GtkIconPaintable *icon,
               texture = load_iride_sibling (icon->filename, FALSE, pixel_size, icon->dark, icon->accent);
 #endif
 
+              char *cached = NULL;
+              gboolean vector = FALSE;
+
+              if (!texture)
+                {
+                  cached = raster_cache_path (icon->filename, pixel_size);
+                  if (cached)
+                    texture = raster_cache_load (cached);
+                }
+
               if (!texture)
                 stream = G_INPUT_STREAM (g_file_read (file, NULL, &load_error));
 
               if (stream)
                 {
-                  texture = gdk_texture_new_from_stream_at_scale (stream,
-                                                                  pixel_size, pixel_size,
-                                                                  &only_fg,
-                                                                  NULL,
-                                                                  &load_error);
+                  texture = gdk_texture_new_from_stream_at_scale_full (stream,
+                                                                       pixel_size, pixel_size,
+                                                                       &only_fg,
+                                                                       &vector,
+                                                                       NULL,
+                                                                       &load_error);
                   g_object_unref (stream);
+                  if (texture && vector && !only_fg && cached)
+                    raster_cache_store (cached, texture);
                 }
 
+              g_free (cached);
               g_object_unref (file);
             }
         }

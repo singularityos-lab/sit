@@ -493,6 +493,18 @@ gdk_texture_new_from_stream_at_scale (GInputStream  *stream,
                                       GCancellable  *cancellable,
                                       GError       **error)
 {
+  return gdk_texture_new_from_stream_at_scale_full (stream, width, height, only_fg, NULL, cancellable, error);
+}
+
+GdkTexture *
+gdk_texture_new_from_stream_at_scale_full (GInputStream  *stream,
+                                           int            width,
+                                           int            height,
+                                           gboolean      *only_fg,
+                                           gboolean      *vector,
+                                           GCancellable  *cancellable,
+                                           GError       **error)
+{
   GBytes *bytes;
   GtkSvg *svg;
   GdkTexture *texture;
@@ -500,6 +512,8 @@ gdk_texture_new_from_stream_at_scale (GInputStream  *stream,
 
   if (only_fg)
     *only_fg = FALSE;
+  if (vector)
+    *vector = FALSE;
 
   bytes = input_stream_get_bytes (stream, error);
   if (!bytes)
@@ -521,6 +535,8 @@ gdk_texture_new_from_stream_at_scale (GInputStream  *stream,
       GTK_DEBUG (ICONFALLBACK, "Expect misrendering: %s", unsupported);
       g_free (unsupported);
     }
+  else if (vector)
+    *vector = TRUE;
 
   texture = svg_to_texture (svg, width, height, NULL, 0);
 

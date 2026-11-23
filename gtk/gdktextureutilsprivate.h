@@ -37,6 +37,13 @@ GdkTexture *gdk_texture_new_from_stream_at_scale    (GInputStream  *stream,
                                                      gboolean      *only_fg,
                                                      GCancellable  *cancellable,
                                                      GError       **error);
+GdkTexture *gdk_texture_new_from_stream_at_scale_full (GInputStream  *stream,
+                                                       int            width,
+                                                       int            height,
+                                                       gboolean      *only_fg,
+                                                       gboolean      *vector,
+                                                       GCancellable  *cancellable,
+                                                       GError       **error);
 GdkTexture *gdk_texture_new_from_resource_at_scale  (const char    *path,
                                                      int            width,
                                                      int            height,
