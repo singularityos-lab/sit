@@ -206,6 +206,13 @@ gtk_at_context_real_child_change (GtkATContext             *self,
 }
 
 static void
+gtk_at_context_real_announce (GtkATContext                      *self,
+                              const char                        *message,
+                              GtkAccessibleAnnouncementPriority  priority)
+{
+}
+
+static void
 gtk_at_context_real_realize (GtkATContext *self)
 {
 }
@@ -252,6 +259,7 @@ gtk_at_context_class_init (GtkATContextClass *klass)
   klass->update_caret_position = gtk_at_context_real_update_caret_position;
   klass->update_selection_bound = gtk_at_context_real_update_selection_bound;
   klass->update_text_contents = gtk_at_context_real_update_text_contents;
+  klass->announce = gtk_at_context_real_announce;
 
   /**
    * GtkATContext:accessible-role:
